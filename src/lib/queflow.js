@@ -1,6 +1,6 @@
 /*!
  * QueFlow.js
- * (c) 2024-now Sodiq Tunde (Dayson9)
+ * (c) 2024-now Sodiq Tunde (lahan-xyz)
  * Released under the MIT License.
  */
 'use-strict';
@@ -994,8 +994,10 @@ const renderNugget = (instance, data, isExtended, children) => {
     
     // Parse and initiate Nested Nuggets
     const initiated = initiateNuggets(template, true);
+    
     // Render parsed html
     let rendered = renderTemplate(initiated, data);
+ 
     const html = g(rendered, className);
     
     if (!instance.stylesheetInitiated) {
