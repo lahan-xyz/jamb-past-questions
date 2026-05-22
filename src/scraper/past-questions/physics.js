@@ -1,13 +1,13 @@
 const PHYSICS = {
   "year_1978": [
     {
-      "question": "",
+      "question": "At what temperature does water experience anomalous expansion?",
       "options": [
-        "1 km N15oE",
-        "1 km N30oE",
-        "\\(\\sqrt 2\\)km N 45oE",
-        "\\(\\sqrt 2\\)km N 60oE",
-        "2km N 75oE"
+        "100°C",
+        "1°C",
+        "-4°C",
+        "-1°C",
+        "-300°K"
       ]
     },
     {

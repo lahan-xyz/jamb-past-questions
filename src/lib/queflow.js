@@ -248,7 +248,7 @@ const generateComponentData = (child, isParent, instance) => {
   // Precompute content injection for non-parents
   if (!isParent) {
     const contentKey = useStrict ? 'innerText' : 'innerHTML';
-    const contentValue = useStrict ? child[contentKey] : child.innerHTML;
+    const contentValue = child[contentKey];
     attributes.push({ attribute: contentKey, value: contentValue });
   }
   
@@ -285,10 +285,11 @@ const generateComponentData = (child, isParent, instance) => {
         child.removeAttribute(attribute);
       }
     }
+    
     child[attribute] = evaluation;
     
     // Template tracking optimization
-    if (hasTemplate && evaluation !== value) {
+    if (hasTemplate) {
       return {
         template: value,
         key: requiresStyleKey ? `style.${attribute}` : attribute,
@@ -418,7 +419,7 @@ function update(child, key, evaluated) {
 
 // Checks if a template placeholder contains a key
 function needsUpdate(template, key) {
-  if (!template.includes("{{") || !template.includes("}}")) return false;
+  if (!template.includes("{{") && !template.includes("}}")) return false;
   
   return (b(template).includes(key)) ? true : needsUpdate(template.replace("{{" + b(template) + "}}", b(template)), key);
 }
@@ -967,7 +968,7 @@ class Atom {
       keys.forEach((key) => {
         if (this.data[indx][key] !== val[key]) {
           this.data[indx][key] = val[key];
-          updateComponent(indx, this, val[key], true);
+          updateComponent(indx, this, val[key]);
         }
       });
     }
