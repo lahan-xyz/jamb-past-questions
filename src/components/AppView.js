@@ -5,7 +5,7 @@ import QuestionCard from '../atoms/QuestionCard.js'
 async function loadSubject(subject, year) {
   const module = await import(`../scraper/past-questions/${subject.toLowerCase()}.js`);
   
-  return module.default[year]; // or however you export the data
+  return module.default[year];
 }
 
 
@@ -51,17 +51,14 @@ const AppView = new Component("AppView", {
       this.updatePage()
     }
   },
+  
   async run() {
-    let firstTen = await loadSubject(this.currentSubject, `year_${this.currentYear}`)
+    const loaded = await loadSubject(this.currentSubject, `year_${this.currentYear}`)
     
-    firstTen = this.transformQuestObj(firstTen.slice(0, 10), 0)
+    const firstTen = this.transformQuestObj(loaded.slice(0, 10), 0)
     
+    // Render all cards with initial data
     QuestionCard.renderWith(firstTen)
-    
-  setTimeout(function() {
-      AppView.currentPage = 2
-      AppView.updatePage()
-    }, 4000)
   },
   
   template: () => `
