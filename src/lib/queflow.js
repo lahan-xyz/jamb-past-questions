@@ -425,25 +425,24 @@ function needsUpdate(template, key) {
 }
 
 // Updates a component based on changes made to it's data
-function updateComponent(ckey, obj, _new) {
+function updateComponent(ckey, instance) {
   let dataQF;
-  if (typeof obj === "boolean") {
+  if (typeof instance === "boolean") {
     globalStateDataQF = filterNullElements(globalStateDataQF);
     dataQF = globalStateDataQF;
   } else {
-    obj.dataQF = filterNullElements(obj.dataQF);
-    dataQF = obj.dataQF;
+    dataQF = filterNullElements(instance.dataQF);
+    instance.dataQF = dataQF;
   }
   
-  for (let d of dataQF) {
-    let { template, key, qfid } = d;
-    const child = selectElement(qfid);
-    if (child) {
-      if (needsUpdate(template, ckey)) {
-        let evaluated = evaluateTemplate(template, obj);
-        key = (key === "class") ? "className" : key;
-        update(child, key, evaluated);
-      }
+  for (let entry of dataQF) {
+    let { template, key, qfid } = entry;
+    const node = selectElement(qfid);
+    if (ckey === "_" || needsUpdate(template, ckey)) {
+      let evaluated = evaluateTemplate(template, instance);
+      
+      key = (key === "class") ? "className" : key;
+      update(node, key, evaluated);
     }
   }
 }
@@ -921,8 +920,8 @@ class Atom {
     
     let rendered = "";
     if (this.isReactive) {
+      this.data = data;
       const processData = (item) => {
-        this.data.push(item);
         const template = typeof this.template === "function" ? this.template(item, this.index) : this.template;
         const indexedTemplate = addIndexToTemplate(template, this.index);
         const init = initiateComponents(indexedTemplate);
@@ -960,23 +959,32 @@ class Atom {
     }
   }
   
-  set(index, value) {
-    if (!this.isReactive) throw new Error(`Cannot call 'set()' on Atom '${this.name}'.\n ${this.name} is not a reactive Atom`);
+  set(index, value, allowShallow) {
+    if (!this.isReactive) throw new Error(`Cannot call 'set()' on Atom ${this.name}.\n\n${this.name} is not a reactive Atom`);
     
-    const upd = (indx, val) => {
+    const shallowUpdate = (indx, val) => {
       const keys = Object.keys(val);
+      
       keys.forEach((key) => {
         if (this.data[indx][key] !== val[key]) {
           this.data[indx][key] = val[key];
-          updateComponent(indx, this, val[key]);
         }
       });
+      
+      updateComponent("_", this);
     }
     
     if (typeof index == "number") {
-      upd(index, value);
+     if (allowShallow) {
+       shallowUpdate(index, value)
+     } else {
+       this.data[index] = value;
+       updateComponent("_", this);
+     }
+     
     } else if (Array.isArray(index)) {
-      index.forEach((val, indx) => (this.data[indx]) && upd(indx, val));
+      this.data = index;
+      updateComponent("_", this);
     } else {
       console.error(`First Argument passed to '${this.name}.set()' must either be a number or an array.`);
     }
@@ -998,7 +1006,7 @@ const renderNugget = (instance, data, isExtended, children) => {
     
     // Render parsed html
     let rendered = renderTemplate(initiated, data);
- 
+    
     const html = g(rendered, className);
     
     if (!instance.stylesheetInitiated) {

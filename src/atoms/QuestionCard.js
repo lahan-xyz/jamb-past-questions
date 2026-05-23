@@ -1,11 +1,10 @@
+// QuestionCard.js
 import { Atom } from 'queflow'
 
 const QuestionCard = new Atom("QuestionCard", {
   template: (props, index) => {
-    
-   return (`
+    return (`
     <div class="qc-card">
-      <!-- question header -->
       <div class="qc-header">
         <div class="qc-badge">
           <span class="qc-badge-label">Q</span>
@@ -14,16 +13,12 @@ const QuestionCard = new Atom("QuestionCard", {
         <span class="qc-year">{{ year }}</span>
       </div>
 
-      <!-- question image -->
       <div class="qc-image-wrap" q:show="{{ src }}">
         <img class="qc-image" src="../src/scraper/images/{{ src }}" alt="{{ year }} Question diagram" />
       </div>
 
-      <!-- question body -->
       <div class="qc-body">
         <p class="qc-text">{{ question }}</p>
-
-        <!-- options -->
         <div class="qc-options">
           <button class="qc-opt" data-letter="A">
             <span class="qc-opt-letter">A</span>
@@ -52,39 +47,24 @@ const QuestionCard = new Atom("QuestionCard", {
   },
   
   stylesheet: {
-    // ----- card shell -----
+    // ----- card shell (optimised) -----
     ".qc-card": `
       background: radial-gradient(circle at 20% 20%, #1b1b28, #0d0d14);
-      border: 1px solid rgba(255,255,255,0.05);
-      border-radius: 28px;
-      padding: 2.2rem 2rem;
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 24px;
+      padding: 2rem 1.8rem;
       display: flex;
       flex-direction: column;
-      gap: 1.8rem;
-      box-shadow: 0 10px 30px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.02);
-      backdrop-filter: blur(2px);
-      transition: transform 0.3s ease, box-shadow 0.3s ease, border-color 0.3s;
-      margin-block: 40px;
+      gap: 1.4rem;
+      box-shadow: 0 8px 20px rgba(0,0,0,0.5);
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+      margin-block: 32px;
       position: relative;
       overflow: hidden;
     `,
-    ".qc-card::before": `
-      content: "";
-      position: absolute;
-      top: 0; left: 0;
-      width: 100%; height: 100%;
-      background: radial-gradient(circle at 50% 0%, rgba(74,222,128,0.08), transparent 70%);
-      opacity: 0;
-      transition: opacity 0.3s;
-      pointer-events: none;
-    `,
     ".qc-card:hover": `
-      transform: translateY(-3px);
-      border-color: rgba(74,222,128,0.3);
-      box-shadow: 0 20px 45px rgba(0,0,0,0.7), 0 0 0 1px rgba(74,222,128,0.2);
-    `,
-    ".qc-card:hover::before": `
-      opacity: 1;
+      transform: translateY(-2px);
+      box-shadow: 0 12px 28px rgba(0,0,0,0.6), 0 0 0 1px rgba(74,222,128,0.25);
     `,
     
     // ----- header -----
@@ -92,7 +72,7 @@ const QuestionCard = new Atom("QuestionCard", {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      padding-bottom: 1.2rem;
+      padding-bottom: 0.9rem;
       border-bottom: 1px solid rgba(255,255,255,0.06);
     `,
     ".qc-badge": `
@@ -103,9 +83,9 @@ const QuestionCard = new Atom("QuestionCard", {
       color: #000;
       font-weight: 800;
       font-size: 1.3rem;
-      padding: 0.4rem 1.2rem 0.4rem 0.8rem;
+      padding: 0.3rem 1.2rem 0.3rem 0.8rem;
       border-radius: 40px;
-      box-shadow: 0 0 20px rgba(74,222,128,0.5), 0 4px 10px rgba(0,0,0,0.3);
+      box-shadow: 0 0 16px rgba(74,222,128,0.4);
       letter-spacing: 0.5px;
     `,
     ".qc-badge-label": `
@@ -123,18 +103,18 @@ const QuestionCard = new Atom("QuestionCard", {
       font-weight: 500;
       color: #888;
       letter-spacing: 0.6px;
-      background: rgba(255,255,255,0.03);
-      padding: 0.3rem 1rem;
+      background: rgba(255,255,255,0.04);
+      padding: 0.25rem 0.9rem;
       border-radius: 30px;
       border: 1px solid rgba(255,255,255,0.05);
     `,
     
     // ----- image -----
     ".qc-image-wrap": `
-      border-radius: 16px;
+      border-radius: 14px;
       overflow: hidden;
       border: 1px solid rgba(255,255,255,0.08);
-      box-shadow: 0 6px 16px rgba(0,0,0,0.4);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.4);
     `,
     ".qc-image": `
       width: 100%;
@@ -142,91 +122,71 @@ const QuestionCard = new Atom("QuestionCard", {
       display: block;
       background: #0a0a0f;
       object-fit: contain;
-      padding: 0.8rem;
+      padding: 0.6rem;
     `,
     
     // ----- body -----
     ".qc-body": `
       display: flex;
       flex-direction: column;
-      gap: 1.8rem;
+      gap: 1.4rem;
     `,
     ".qc-text": `
-      font-size: 1.2rem;
+      font-size: 1.15rem;
       font-weight: 450;
-      line-height: 1.8;
+      line-height: 1.75;
       color: #e4e4e7;
       margin: 0;
-      letter-spacing: 0.2px;
     `,
     
     // ----- options -----
     ".qc-options": `
       display: flex;
       flex-direction: column;
-      gap: 0.75rem;
+      gap: 0.6rem;
     `,
     ".qc-opt": `
       all: unset;
       display: flex;
       align-items: center;
-      gap: 1rem;
-      background: rgba(255,255,255,0.02);
+      gap: 0.9rem;
+      background: rgba(255,255,255,0.025);
       border: 1px solid rgba(255,255,255,0.06);
-      border-radius: 14px;
-      padding: 1rem 1.2rem;
+      border-radius: 12px;
+      padding: 0.85rem 1.1rem;
       cursor: pointer;
-      transition: background 0.2s, border-color 0.2s, transform 0.2s, box-shadow 0.2s;
+      transition: background 0.15s, border-color 0.15s, transform 0.15s;
       color: #ccc;
       font-size: 0.95rem;
       font-weight: 450;
       position: relative;
     `,
-    ".qc-opt::after": `
-      content: "";
-      position: absolute;
-      left: -2px;
-      top: 50%;
-      transform: translateY(-50%);
-      width: 4px;
-      height: 60%;
-      background: linear-gradient(to bottom, #4ade80, #22c55e);
-      border-radius: 2px;
-      opacity: 0;
-      transition: opacity 0.2s, width 0.2s;
-    `,
     ".qc-opt:hover": `
-      background: rgba(255,255,255,0.06);
+      background: rgba(255,255,255,0.07);
       border-color: rgba(255,255,255,0.15);
-      transform: translateX(6px);
-      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-    `,
-    ".qc-opt:hover::after": `
-      opacity: 1;
-      width: 6px;
+      transform: translateX(4px);
     `,
     ".qc-opt:active": `
-      transform: scale(0.98);
-      background: rgba(255,255,255,0.09);
+      transform: scale(0.985);
     `,
     ".qc-opt-letter": `
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      width: 34px;
-      height: 34px;
+      width: 32px;
+      height: 32px;
       border-radius: 50%;
       background: #232330;
       font-weight: 700;
       font-size: 0.8rem;
       color: #aaa;
       flex-shrink: 0;
-      transition: background 0.2s, color 0.2s, box-shadow 0.2s;
+      transition: background 0.15s, color 0.15s;
     `,
     ".qc-opt:hover .qc-opt-letter": `
       background: #4ade80;
       color: #000;
-      box-shadow: 0 0 12px #4ade80;
+      box-shadow: 0 0 10px #4ade80;
     `,
     ".qc-opt-text": `
       flex: 1;
@@ -235,20 +195,20 @@ const QuestionCard = new Atom("QuestionCard", {
     // ----- responsive -----
     "@media (max-width: 500px)": {
       ".qc-card": `
-        padding: 1.6rem 1.3rem;
-        border-radius: 22px;
-        gap: 1.2rem;
+        padding: 1.4rem 1.1rem;
+        border-radius: 18px;
+        gap: 1rem;
       `,
       ".qc-text": `
         font-size: 1rem;
       `,
       ".qc-opt": `
-        padding: 0.8rem 1rem;
-        font-size: 0.9rem;
+        padding: 0.7rem 0.9rem;
+        font-size: 0.88rem;
       `,
       ".qc-badge": `
         font-size: 1.1rem;
-        padding: 0.3rem 1rem 0.3rem 0.6rem;
+        padding: 0.25rem 0.9rem 0.25rem 0.6rem;
       `,
     },
   },
