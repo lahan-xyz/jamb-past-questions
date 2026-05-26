@@ -8,7 +8,8 @@ const Text = new Nugget ('Text', {
     
     
     return (`
-      <span color={{ color }} text-align={{ align }} font-size="{{ size }}px">{{ txt }}</span>
+      <span color={{ color }} text-align={{ align }} font-size="{{ size }}px" onclick={{ click }}>{{ txt }} </> 
+      </span>
     `)
   },
   stylesheet: {

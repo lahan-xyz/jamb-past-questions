@@ -1,7 +1,8 @@
 import { Component } from 'queflow'
 import QuestionCard from '../atoms/QuestionCard.js'
 
-// Subject list – you can import from your data files later
+
+// Subject list
 const SUBJECTS = ['Mathematics', 'English', 'Chemistry', 'Physics']
 
 const YEARS = Array.from({ length: 2025 - 1978 + 1 }, (_, i) => 1978 + i)
@@ -18,31 +19,32 @@ const AppView = new Component("AppView", {
     currentYear: 2024,
     currentPage: 1,
     totalPages: 6, // will be updated dynamically
+    exist: true
   },
   
-  created() {
+  created(data) {
     this.isRendered = false;
     // Helper functions stay as plain instance props (no reactivity)
     this.computePageIdxRange = () => {
-      const first = (this.data.currentPage * 10) - 10
-      const second = (this.data.currentPage * 10)
+      const first = (data.currentPage * 10) - 10
+      const second = (data.currentPage * 10)
       return [first, second]
     }
     
     this.transformQuestObj = (obj, idxStart) => {
       return obj.map((obj, index) => {
         idxStart += 1
-        return { ...obj, quest_no: idxStart, year: this.data.currentYear }
+        return { ...obj, quest_no: idxStart, year: data.currentYear }
       })
     }
     
     this.loadAndRender = async () => {
-      const questions = await loadSubject(this.data.currentSubject, this.data.currentYear)
+      const questions = await loadSubject(data.currentSubject, data.currentYear)
       const [first, second] = this.computePageIdxRange()
       const sliced = questions.slice(first, second)
       const transformed = this.transformQuestObj(sliced, first)
       // update total pages dynamically
-      this.data.totalPages = Math.ceil(questions.length / 10) || 1
+      data.totalPages = Math.ceil(questions.length / 10) || 1
       
       if (this.isRendered) {
         QuestionCard.set(transformed)
@@ -54,15 +56,15 @@ const AppView = new Component("AppView", {
     
     // Page navigation
     this.previousPage = () => {
-      if (this.data.currentPage > 1) {
-        this.data.currentPage -= 1
+      if (data.currentPage > 1) {
+        data.currentPage -= 1
         this.loadAndRender()
       }
     }
     
     this.nextPage = () => {
-      if (this.data.currentPage < this.data.totalPages) {
-        this.data.currentPage += 1
+      if (data.currentPage < data.totalPages) {
+        data.currentPage += 1
         this.loadAndRender()
       }
     }
@@ -71,6 +73,7 @@ const AppView = new Component("AppView", {
   async run() {
     // Initial load
     await this.loadAndRender()
+    // q:show, q:text, q:html, q:once:attr, q:class, q:style
   },
   
   template: (data) => `
@@ -132,8 +135,20 @@ const AppView = new Component("AppView", {
       cursor: pointer;
       outline: none;
       transition: border-color 0.2s, box-shadow 0.2s;
+  
+      /* remove browser default appearance (including Safari) */
+      -webkit-appearance: none;
+      -moz-appearance: none;
       appearance: none;
-      background-image: url("data:image/svg+xml,..."); /* optional arrow */
+  
+      /* custom dropdown arrow */
+      background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e");
+      background-repeat: no-repeat;
+      background-position: right 1rem center;
+      background-size: 1em;
+  
+      /* ensure width is determined by content + padding, not by default sizing */
+      min-width: 18rem;
     `,
     ".app-select:hover, .app-select:focus": `
       border-color: #4ade80;

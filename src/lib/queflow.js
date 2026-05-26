@@ -18,11 +18,72 @@ var stylesheet = {
   isAppended: false
 };
 
+const updateQueue = [];
+let microtaskPending = false;
+
 const components = new Map(),
   nuggets = new Map();
 
-// Selects an element in the DOM using its data-qfid attribute.
-const selectElement = qfid => document.querySelector("[data-qfid=" + qfid + "]");
+// Cached reactive elements
+const reactiveCache = new Map();
+
+// LRU Cache class
+class LRUCache {
+  constructor(maxSize = 500) {
+    this.maxSize = maxSize;
+    this._map = new Map();
+  }
+  
+  get(key) {
+    if (!this._map.has(key)) return undefined;
+    // Move to end (most recently used)
+    const value = this._map.get(key);
+    this._map.delete(key);
+    this._map.set(key, value);
+    return value;
+  }
+  
+  set(key, value) {
+    // If key already exists, delete it first so the new insert goes to the end
+    if (this._map.has(key)) {
+      this._map.delete(key);
+    } else if (this._map.size >= this.maxSize) {
+      // Evict the least recently used (first item in the map)
+      const oldestKey = this._map.keys().next().value;
+      this._map.delete(oldestKey);
+    }
+    this._map.set(key, value);
+  }
+  
+  has(key) {
+    return this._map.has(key);
+  }
+  
+  delete(key) {
+    return this._map.delete(key);
+  }
+  
+  clear() {
+    this._map.clear();
+  }
+  
+  get size() {
+    return this._map.size;
+  }
+}
+
+
+// O(1) element lookup
+const selectElement = qfid => {
+  return reactiveCache.get(qfid) || document.querySelector(`[data-qfid="${qfid}"]`);
+};
+
+// O(N) JavaScript-only filter, zero DOM calls
+function filterNullElements(input) {
+  if (!input || input.length === 0) return input;
+  return input.filter(d => reactiveCache.has(d.qfid));
+  
+}
 
 
 const strToEl = (component) => {
@@ -32,66 +93,90 @@ const strToEl = (component) => {
   }
 }
 
-// Filters out null elements from the given input [Array].
-function filterNullElements(input) {
-  return input.filter((d) => selectElement(d.qfid) ? d : null);
-}
-
 const globalState = (name, val, shouldStore) => {
   let stored;
   if (shouldStore) {
     stored = localStorage.getItem(name);
-    val = stored ? JSON.parse(stored) : val;
+    val = stored ? JSON.parse(stored) : val; // only parse if truthy
   }
+  
   const obj = typeof val === "object" ? val : { value: val };
+  
+  // Batching helpers for localStorage writes
+  let localStorageDirty = false;
+  const persist = () => {
+    if (shouldStore && localStorageDirty) {
+      localStorage.setItem(name, JSON.stringify(obj));
+      localStorageDirty = false;
+    }
+  };
+  
   const reactiveObj = (object) => {
     return new Proxy(object, {
       get(target, key) {
+        // Optional: if you want deep reactivity, return a reactive proxy for nested objects here.
+        // For now, keep the simple direct return.
         return target[key];
       },
       set(target, key, value) {
         if (target[key] !== value) {
           target[key] = value;
+          // Trigger DOM update (already batched via batchedUpdate)
           updateComponent(key, true, value);
-          if (shouldStore) localStorage.setItem(name, JSON.stringify(target));
+          
+          // Mark localStorage as dirty; write will happen once per microtask
+          if (shouldStore) {
+            localStorageDirty = true;
+            queueMicrotask(persist);
+          }
         }
+        return true;
       }
-    })
-  }
+    });
+  };
+  
   globalThis[name] = reactiveObj(obj);
-}
+};
 
-// Creates a reactive signal, a proxy object that automatically updates the DOM/Component when its values change.
+// Creates a reactive signal, a proxy object that automatically updates the DOM when its values change.
 function createSignal(data, object) {
-  const item = typeof data != "object" ? { value: data } : data;
+  const item = typeof data !== "object" ? { value: data } : data;
+  
+  // Cache for nested reactive wrappers – one proxy per underlying object
+  const cache = new WeakMap();
   
   function createReactiveObject(obj) {
-    if (typeof obj !== "object") return obj;
+    if (typeof obj !== "object" || obj === null) return obj;
     
-    return new Proxy(obj, {
+    // Return existing proxy if available
+    if (cache.has(obj)) return cache.get(obj);
+    
+    const proxy = new Proxy(obj, {
       get(target, key) {
-        return createReactiveObject(target[key]); // Make nested objects reactive
+        // Recursively wrap nested objects, but now cached
+        return createReactiveObject(target[key]);
       },
       set(target, key, value) {
         const prev = target[key];
         if (prev !== value) {
           target[key] = value;
-          requestAnimationFrame(() => {
-            const host = object;
-            if (!host.isFrozen) {
-              const goAhead = host.onUpdate ? host.onUpdate({
-                oldVal: prev,
-                key: key,
-                newVal: value
-              }, host.data) : true;
-              if (goAhead) updateComponent(key, host, value);
-              return true;
-            }
-          });
+          
+          // Run the update synchronously – batching is handled by batchedUpdate
+          if (!object.isFrozen) {
+            const goAhead = object.onUpdate ?
+              object.onUpdate({ oldVal: prev, key, newVal: value },
+                object.data
+              ) :
+              true;
+            if (goAhead) updateComponent(key, object, value);
+          }
         }
         return true;
-      },
+      }
     });
+    
+    cache.set(obj, proxy);
+    return proxy;
   }
   
   return createReactiveObject(item);
@@ -99,35 +184,46 @@ function createSignal(data, object) {
 
 const b = str => stringBetween(str, "{{", "}}");
 
-// Checks if a DOM element has child elements.
-const hasChildren = (element) => element.children.length;
 
 // Extracts the string between two delimiters in a given string.
 function stringBetween(str, f, s) {
-  const indx1 = str.indexOf(f),
-    indx2 = str.indexOf(s);
-  
+  const indx1 = str.indexOf(f);
+  if (indx1 === -1) return "";
+  const indx2 = str.indexOf(s, indx1 + f.length);
+  if (indx2 === -1) return "";
   return str.slice(indx1 + f.length, indx2);
 }
 
 // Sanitizes a string to prevent potential XSS attacks.
 function sanitizeString(str) {
-  const excluded_chars = [{ from: "<", to: "&lt;" }, { from: ">", to: "&gt;" }];
+  str = String(str);
   
-  str = new String(str);
-  
-  for (const index in excluded_chars) {
-    const { from, to } = excluded_chars[index];
-    str = str.replaceAll(from, to);
-  }
-  
-  return str.replace(/javascript:/gi, '');
+  // Single‑pass regex: escape HTML special chars & remove "javascript:"
+  return str.replace(/[&<>"']|javascript:/gi, match => {
+    switch (match) {
+      case '&':
+        return '&amp;';
+      case '<':
+        return '&lt;';
+      case '>':
+        return '&gt;';
+      case '"':
+        return '&quot;';
+      case "'":
+        return '&#39;';
+      default: // matched "javascript:" (case‑insensitive)
+        return '';
+    }
+  });
 }
 
 
 const EVAL_REGEX = /\{\{[^\{\{]+\}\}/g;
 const ENTITY_REGEX = /&(gt|lt);/g;
 const FALSY = [undefined, NaN, null];
+
+// Global evaluator cache – keyed by the full expression string
+const evaluatorCache = new Map();
 
 function evaluateTemplate(reff, instance) {
   let out = "",
@@ -136,36 +232,51 @@ function evaluateTemplate(reff, instance) {
   try {
     out = reff.replace(EVAL_REGEX, (match) => {
       currentMarkup = match;
-      // Combined HTML entity replacement in single pass
+      
+      // Convert HTML entities back to real characters in one pass
       const processedMatch = match.replace(ENTITY_REGEX, (_, entity) =>
         entity === 'gt' ? '>' : '<'
       );
+      
+      // Extract the raw expression between {{ and }}
       let ext = b(processedMatch).trim();
+      if (!ext) return match; // edge case: empty expression, keep original
+      
       const shouldNegate = ext.startsWith('!');
       const isGlobal = ext.startsWith('$');
-      const prefix = ext.startsWith('this') ? '' : 'this.data.';
-      let rendered;
       
-      if (!isGlobal) {
-        ext = shouldNegate ?
-          `!${prefix}${ext.slice(1)}` :
-          `${prefix}${ext}`;
-        
-        let parsed = Function(`return ${ext}`).call(instance);
-        if (FALSY.includes(parsed) && parsed != "0") {
-          parsed = Function(`return ${ext}`).call(instance);
-        }
-        
-        rendered = FALSY.includes(parsed) && parsed != "0" ?
-          match :
-          parsed;
+      // Build the cache key and the JavaScript source code
+      let source, cacheKey;
+      if (isGlobal) {
+        // Global expression – evaluated without instance context
+        source = `return ${ext}`;
+        cacheKey = `g:${ext}`;
       } else {
-        rendered = Function(`return ${ext}`)();
+        // Local expression – prefix with 'this.data.' unless it starts with 'this'
+        const prefixed = ext.startsWith('this') ? ext : `this.data.${ext}`;
+        source = `return ${prefixed}`;
+        cacheKey = `l:${prefixed}`;
       }
-      return rendered;
+      
+      // Retrieve or compile the accessor function (cached)
+      let evaluator = evaluatorCache.get(cacheKey);
+      if (!evaluator) {
+        evaluator = new Function(source);
+        evaluatorCache.set(cacheKey, evaluator);
+      }
+      
+      // Call the function with the correct context
+      let parsed = isGlobal ? evaluator() : evaluator.call(instance);
+      
+      // Original fallback logic: if the value is falsy (and not "0"), show the raw template
+      if (FALSY.includes(parsed) && parsed !== "0") {
+        return match;
+      }
+      
+      return parsed;
     });
   } catch (error) {
-    console.error(`QueFlow Error:\nAn error occured from expression \`${currentMarkup}\``);
+    console.warn(`QueFlow:\nAn error occured from expression \`${currentMarkup}\`\n${error}`);
   }
   
   return out;
@@ -178,10 +289,50 @@ function getAttributes(el) {
 }
 
 
-// Converts JSX/HTML string into plain HTML and Component data, handling placeholders.
-function jsxToHTML(jsx, instance, subId, flag) {
+// Helper: wraps any text node that contains a reactive expression in a <span>
+function wrapBareExpressions(root) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodesToWrap = [];
+  
+  let node;
+  while ((node = walker.nextNode())) {
+    const needsWrapping = node.textContent.includes('{{') && node.textContent.includes('}}') && node.parentNode.childElementCount > 0;
+    
+    if (needsWrapping) {
+      nodesToWrap.push(node);
+    }
+  }
+  
+  for (const textNode of nodesToWrap) {
+    const span = document.createElement('span');
+    span.style.cssText = `
+      display: inline;
+      font: inherit;
+      color: inherit;
+      text-decoration: inherit;
+      text-transform: inherit;
+      letter-spacing: inherit;
+      word-spacing: inherit;
+      white-space: inherit;
+      vertical-align: baseline;
+      line-height: inherit;
+      direction: inherit;
+      unicode-bidi: inherit;
+    `;
+    textNode.parentNode.insertBefore(span, textNode);
+    span.appendChild(textNode);
+  }
+}
+
+
+function jsxToHTML(jsx, instance, subId) {
+  const range = document.createRange();
+  const fragment = range.createContextualFragment(jsx);
   const div = document.createElement("div");
-  div.innerHTML = jsx;
+  div.appendChild(fragment);
+  
+  wrapBareExpressions(div);
+  
   const data = [];
   
   try {
@@ -192,17 +343,28 @@ function jsxToHTML(jsx, instance, subId, flag) {
         element.dataset.sub_id = subId;
       }
       
-      data.push(...generateComponentData(element, hasChildren(element), instance));
+      data.push(
+        ...generateComponentData(
+          element,
+          element.childElementCount > 0, // isParent
+          instance
+        )
+      );
+      
       element.removeAttribute("innertext");
     }
+    
+    const html = div.innerHTML;
+    
+    div.remove();
+    return [html.replaceAll("<br>", "\n"), data];
   } catch (error) {
-    console.error(`QueFlow Error:\nAn error in Component \`${instance.name || ""}\`:\n ${error}\n\nError sourced from: \`${jsx}\``);
+    console.warn(
+      `QueFlow:\nAn error in Component \`${instance.name || ""}\`:\n ${error}\n\nError sourced from: \`${jsx}\``
+    );
+    div.remove();
+    return ["", data];
   }
-  
-  const out = !flag ? evaluateTemplate(div.innerHTML, instance) : div.innerHTML;
-  
-  div.remove();
-  return [out.replaceAll("<br>", "\n"), data];
 }
 
 
@@ -225,88 +387,144 @@ function isSame(obj1, obj2) {
 }
 
 function convertDirective(attr, value, child) {
-  const btw = b(value);
+  if (!attr.startsWith('q:')) return [attr, value, false];
+  
+  child.removeAttribute(attr);
+  
+  const getExpression = (val) => {
+    if (val.includes('{{') && val.includes('}}')) {
+      return b(val).trim();
+    }
+    return null;
+  };
+  
+  // --- q:once:xxx – one-time binding on any attribute ---
+  if (attr.startsWith('q:once:')) {
+    const realAttr = attr.slice(7);
+    return [realAttr, value, true];
+  }
+  
+  // --- Standard directives ---
   switch (attr) {
-    case 'q:show':
-      child.removeAttribute(attr);
-      return ['display', btw ? `{{ ${btw} ? 'block' : 'none' }}` : btw];
-      break;
-      
+    case 'q:show': {
+      const expr = getExpression(value);
+      if (expr) return ['display', `{{ ${expr} ? 'block' : 'none' }}`, false];
+      const show = value === 'true' || value === true;
+      return ['display', show ? 'block' : 'none', false];
+    }
+    case 'q:text': {
+      child.textContent = value;
+      return ['textContent', value, false];
+    }
+    case 'q:html':
+      return ['innerHTML', value, false];
+    case 'q:class':
+      return ['className', value, false];
+    case 'q:style':
+      return ['style', value, false];
     default:
-      return [attr, value];
+      if (attr === 'q:once') {
+        console.warn(`QueFlow: 'q:once' must be followed by ':attribute' (e.g., q:once:id="...").`);
+      } else {
+        console.warn(`QueFlow: unknown directive '${attr}'`);
+      }
+      return [attr, value, false];
+      return [attr, value, false];
   }
 }
 
 // Generates and returns dataQF property
 const generateComponentData = (child, isParent, instance) => {
-  
   const arr = [];
   const attributes = getAttributes(child);
-  let componentId = child.dataset.qfid;
+  let QFID = child.dataset.qfid;
   const { useStrict } = instance;
-  
-  // Precompute content injection for non-parents
+    
   if (!isParent) {
-    const contentKey = useStrict ? 'innerText' : 'innerHTML';
-    const contentValue = child[contentKey];
+    const qText = child.getAttribute('q:text');
+    const qHTML = child.getAttribute('q:html');
+    
+    let contentKey, contentValue;
+    
+    if (qHTML) {
+      contentKey = 'innerHTML';
+      contentValue = qHTML;
+    } else if (qText) {
+      contentKey = useStrict ? 'textContent' : 'innerHTML';
+      contentValue = qText;
+    } else {
+      contentKey = useStrict ? 'textContent' : 'innerHTML';
+      contentValue = child[contentKey];
+    }
+    
     attributes.push({ attribute: contentKey, value: contentValue });
+    
+    if (qText && qHTML) {
+      console.warn(`QueFlow: Element has both q:text and q:html – q:html will be used.\nError sourced from: "${child.outerHTML}"`);
+    }
   }
   
-  // Cache expensive operations
-  const processAttribute = ({ attribute, value }) => {
+  for (const entry of attributes) {
+    let { attribute, value } = entry,
+    once = false;
     value = value || '';
-    [attribute, value] = convertDirective(attribute, value, child);
     
+    // Apply directive conversions
+    [attribute, value, once] = convertDirective(attribute, value, child);
+   
     const hasTemplate = value.includes('{{') && value.includes('}}');
-    const processedValue = b(value).trim();
-    const isGlobal = processedValue.startsWith('$');
+    
+    // Determine if this is a style property or a regular one
+    const isStyle = (attribute in child.style) && attribute.toLowerCase() !== 'src';
+    
+    // Skip heavy processing for static attributes
+    if (!hasTemplate) {
+      // Apply the static value to the element immediately
+      if (isStyle) {
+        child.style[attribute] = value;
+        child.removeAttribute(attribute);
+      } else {
+        child[attribute] = value;
+      }
+      continue;
+    }
+    
+    
+    // Evaluate the template expression (cached)
     const evaluation = evaluateTemplate(value, instance);
     
-    // Generate component ID once per element
-    if (!componentId && hasTemplate) {
-      child.dataset.qfid = `qf${counterQF}`;
-      componentId = `qf${counterQF}`;
+    // Assign a unique qf‑id if this element doesn’t have one yet
+    if (!QFID) {
+      QFID = `qf${counterQF}`;
+      child.dataset.qfid = QFID;
       counterQF++;
     }
     
-    // DOM manipulation optimization
-    const style = child.style;
-    const styleProp = style[attribute];
-    const isValidStyleProp = styleProp !== undefined;
-    const requiresStyleKey = (
-      (isValidStyleProp && attribute.toLowerCase() !== 'src') ||
-      attribute === 'filter'
-    );
-    
-    // Single DOM write path
-    if (isValidStyleProp || styleProp === '') {
-      style[attribute] = evaluation;
-      if (attribute.toLowerCase() !== 'src') {
-        child.removeAttribute(attribute);
-      }
+    if (isStyle) {
+      child.style[attribute] = evaluation;
+      child.removeAttribute(attribute);
+    } else {
+      // Standard property assignment (id, className, value, etc.)
+      child[attribute] = evaluation;
     }
     
-    child[attribute] = evaluation;
+    // Extract the raw expression to check if it’s global
+    const expression = b(value).trim();
+    const isGlobal = expression.startsWith('$');
     
-    // Template tracking optimization
-    if (hasTemplate) {
-      return {
-        template: value,
-        key: requiresStyleKey ? `style.${attribute}` : attribute,
-        qfid: componentId,
-        isGlobal: isGlobal
-      };
-    }
-    return null;
-  };
-  
-  // Batch process attributes
-  for (const entry of attributes) {
-    const result = processAttribute(entry);
-    if (result) {
-      result.isGlobal ?
-        globalStateDataQF.push(result) :
-        arr.push(result);
+    const entryObj = {
+      template: value,
+      key: isStyle ? `style.${attribute}` : attribute,
+      qfid: QFID,
+      isGlobal,
+      once
+    };
+    
+    // Push to the appropriate queue
+    if (isGlobal) {
+      globalStateDataQF.push(entryObj);
+    } else {
+      arr.push(entryObj);
     }
   }
   
@@ -316,12 +534,14 @@ const generateComponentData = (child, isParent, instance) => {
 
 // Function to convert an object into a CSS string
 function objToStyle(selector = "", obj = {}, alt = "", shouldSwitch) {
-  let style = "";
+  const lines = [];
   
   for (const key in obj) {
     const value = obj[key];
     
-    // --- Determine if the current key is a special at-rule ---
+    // Guard against non-object/non-string values
+    if (typeof value !== "string" && typeof value !== "object") continue;
+    
     const isKeyframes = key.includes("@keyframes");
     const isFontFace = key.includes("@font-face");
     const isSpecialAtRule = isKeyframes || isFontFace;
@@ -329,22 +549,22 @@ function objToStyle(selector = "", obj = {}, alt = "", shouldSwitch) {
     const isRegularRule = !isSpecialAtRule && !isMedia;
     
     if (typeof value === "string") {
-      const sel = (typeof value === "string" || isMedia) ? selector : "";
+      // Build rule: either "selector key { value }" or "key selector { value }"
+      const rule = shouldSwitch ?
+        `${key}${isRegularRule ? selector : ""} { ${value} }` :
+        `${isRegularRule ? selector + " " : ""}${key} { ${value} }`;
       
-      if (!shouldSwitch) {
-        // In standard mode, only prepend sel for regular rules
-        style += `\n${isRegularRule ? sel : ""} ${key} {${value}}\n`;
-      } else {
-        // In switched mode, only append sel for regular rules
-        style += `\n${key}${isRegularRule ? sel : ""} {\n${value}}\n`;
-      }
+      lines.push(rule);
     } else {
-      // Recurse for nested objects (e.g., @media)
-      style += `\n${key} {\n${objToStyle(selector, value, key, shouldSwitch)}\n}`;
+      // Nested at-rule (e.g., @media, @keyframes with object body)
+      // Recursively process, but only once we've opened the block
+      lines.push(`${key} {`);
+      lines.push(objToStyle(selector, value, key, shouldSwitch));
+      lines.push(`}`);
     }
   }
   
-  return style;
+  return lines.join("\n");
 }
 
 // Function to initiate the stylesheet
@@ -353,14 +573,18 @@ function initiateStyleSheet(selector = "", instance = {}, shouldSwitch) {
   let styles = objToStyle(selector, instance.stylesheet, "", shouldSwitch);
   
   // Append the styles to the stylesheet element
-  (stylesheet.el).textContent += styles;
+  stylesheet.el.textContent += styles;
   
   // Append the stylesheet to the document head if not already appended
   if (!stylesheet.isAppended) {
     document.head.appendChild(stylesheet.el);
+    stylesheet.isAppended = true;
   }
 }
 
+
+// Global cache for compiled event handlers
+const eventHandlerCache = new LRUCache(500);
 
 function handleEventListener(parent, instance) {
   const children = parent.querySelectorAll("*");
@@ -368,63 +592,149 @@ function handleEventListener(parent, instance) {
   for (const child of children) {
     const subId = child.dataset.sub_id;
     const targetInstance = subId ? components.get(subId) : instance;
+    if (!targetInstance) continue;
     
-    if (targetInstance) {
-      const attributes = getAttributes(child);
+    const attributes = getAttributes(child);
+    
+    for (const { attribute, value } of attributes) {
+      if (!attribute.startsWith("on")) continue;
       
-      for (const { attribute, value } of attributes) {
-        if (attribute.startsWith("on")) {
-          try {
-            child[attribute] = Function("e", `const data = this.data; ${value}`).bind(targetInstance);
-            
-          } catch (e) {
-            console.error(`QueFlow Error:\nFailed to add event listener on ${child.tagName} element:\n\nError from: \`${value}\``);
-          }
+      // Cache key: instance identity + attribute + expression
+      const cacheKey = `${targetInstance.constructor.name || ''}_${value}`;
+      let handler = eventHandlerCache.get(cacheKey);
+      
+      if (!handler) {
+        try {
+          // Compile the function body once per unique expression/instance pair
+          handler = Function("e", `const data = this.data; ${value}`).bind(targetInstance);
+          eventHandlerCache.set(cacheKey, handler);
+        } catch (e) {
+          console.warn(`QueFlow:\nFailed to add event listener on ${child.tagName} element:\n\nError from: \`${value}\``);
+          continue;
         }
       }
+      
+      // Assign the handler
+      child[attribute] = handler;
+      
+      // Store the cache key on the element for later cleanup
+      if (!child._qfHandlerKeys) child._qfHandlerKeys = [];
+      child._qfHandlerKeys.push(cacheKey);
     }
+    
+    // Cleanup
     child.removeAttribute("data-sub_id");
+    
+    // Cache reactive elements (skip if already cached)
+    const qfid = child.getAttribute('data-qfid');
+    if (qfid && !reactiveCache.has(qfid)) {
+      reactiveCache.set(qfid, child);
+    }
   }
 }
+
 
 function update(child, key, evaluated) {
   switch (key) {
     case 'q:exist':
-      if (evaluated == "false") {
-        removeEvents([child, ...child.querySelectorAll("*")]);
+      if (evaluated === "false") {
+        const descendants = [];
+        const walker = document.createTreeWalker(
+          child,
+          NodeFilter.SHOW_ELEMENT
+        );
+        let node;
+        while ((node = walker.nextNode())) {
+          descendants.push(node);
+        }
+        
+        removeEvents([child, ...descendants]);
         child.remove();
       }
       break;
+      
     case 'disabled':
-      if (evaluated == "false") {
-        if (child.getAttribute(key) != evaluated) child.removeAttribute("disabled");
+      if (evaluated === "false") {
+        if (child.disabled !== false) child.removeAttribute("disabled");
       } else {
-        if (child.getAttribute(key) != evaluated) child.setAttribute(key, evaluated);
+        if (child.disabled !== true) child.setAttribute("disabled", evaluated);
       }
       break;
+      
     default:
       if (key.indexOf("style.") > -1) {
-        let sliced = key.slice(6);
-        child.style[sliced] = evaluated;
+        const sliced = key.slice(6);
+        if (child.style[sliced] !== evaluated) {
+          child.style[sliced] = evaluated;
+        }
       } else {
         if (!child?.hasAttribute(key)) {
-          if (child[key] != evaluated) child[key] = evaluated;
+          if (child[key] != evaluated) {
+            child[key] = evaluated;
+          }
         } else {
-          if (child.getAttribute(key) != evaluated) child.setAttribute(key, evaluated);
+          if (child.getAttribute(key) != evaluated) {
+            child.setAttribute(key, evaluated);
+          }
         }
       }
   }
 }
 
 
-// Checks if a template placeholder contains a key
-function needsUpdate(template, key) {
-  if (!template.includes("{{") && !template.includes("}}")) return false;
-  
-  return (b(template).includes(key)) ? true : needsUpdate(template.replace("{{" + b(template) + "}}", b(template)), key);
+function scheduleFlush() {
+  if (!microtaskPending) {
+    microtaskPending = true;
+    queueMicrotask(flushUpdates);
+  }
 }
 
-// Updates a component based on changes made to it's data
+function batchedUpdate(child, key, evaluated) {
+  updateQueue.push({ child, key, evaluated });
+  scheduleFlush();
+}
+
+function flushUpdates() {
+  // Prevent re-entrancy if flush itself triggers more updates
+  const batch = [...updateQueue];
+  updateQueue.length = 0;
+  microtaskPending = false;
+  
+  for (const { child, key, evaluated } of batch) {
+    // Guard: child may have been removed by a previous queued entry
+    if (child?.isConnected) {
+      update(child, key, evaluated);
+    }
+  }
+}
+
+
+const NEEDSUPDATE_REGEX = /\{\{(.+?)\}\}/g;
+
+function needsUpdate(template, key) {
+  if (!template.includes('{{') || !template.includes('}}')) return false;
+  // Reset regex state
+  NEEDSUPDATE_REGEX.lastIndex = 0;
+  let match;
+  while ((match = NEEDSUPDATE_REGEX.exec(template)) !== null) {
+    if (match[1].includes(key)) return true;
+  }
+  return false;
+}
+
+
+// Attribute-to-property mapping for standard DOM elements
+const ATTR_TO_PROP = {
+  class: 'className',
+  for: 'htmlFor',
+  tabindex: 'tabIndex',
+  readonly: 'readOnly',
+  maxlength: 'maxLength',
+  accesskey: 'accessKey',
+  colspan: 'colSpan',
+  rowspan: 'rowSpan'
+};
+
 function updateComponent(ckey, instance) {
   let dataQF;
   if (typeof instance === "boolean") {
@@ -435,27 +745,65 @@ function updateComponent(ckey, instance) {
     instance.dataQF = dataQF;
   }
   
-  for (let entry of dataQF) {
-    let { template, key, qfid } = entry;
+  const toRemove = []; // indices of entries flagged for one-time removal
+  
+  for (let i = 0; i < dataQF.length; i++) {
+    const entry = dataQF[i];
+    const { template, key, qfid, once } = entry;
+    
+    if (ckey !== "_" && !needsUpdate(template, ckey)) continue;
+    
     const node = selectElement(qfid);
-    if (ckey === "_" || needsUpdate(template, ckey)) {
-      let evaluated = evaluateTemplate(template, instance);
-      
-      key = (key === "class") ? "className" : key;
-      update(node, key, evaluated);
+    if (!node) {
+      // This shouldn't happen after filterNullElements, but guard anyway
+      toRemove.push(i);
+      continue;
     }
+    
+    let evaluated = evaluateTemplate(template, instance);
+    
+    // --- Special handling for q:class / q:style ---
+    if (key === 'className' && typeof evaluated === 'object') {
+      evaluated = Object.keys(evaluated).filter(cls => evaluated[cls]).join(' ');
+    }
+    
+    if (key === 'style' && typeof evaluated === 'object') {
+      // Merge all style properties at once (batched via the same microtask flush)
+      Object.assign(node.style, evaluated);
+    } else {
+      let domKey = key.startsWith('style.') ? key : (ATTR_TO_PROP[key.toLowerCase()] || key);
+      batchedUpdate(node, domKey, evaluated);
+    }
+    
+    // Mark for removal if this was a one‑time binding
+    if (once) {
+      toRemove.push(i);
+    }
+  }
+  
+  // Remove one‑time bindings (iterate backwards to keep indices valid)
+  for (let i = toRemove.length - 1; i >= 0; i--) {
+    dataQF.splice(toRemove[i], 1);
+  }
+  
+  // Sync back the cleaned array
+  if (typeof instance !== 'boolean') {
+    instance.dataQF = dataQF;
+  } else {
+    globalStateDataQF = dataQF;
   }
 }
 
+// Module‑level constant
+const RENDER_TEMPLATE_REGEX = /\{\{([^\{\}]+)\}\}/g;
+
 function renderTemplate(input, props, shouldSanitize) {
-  const regex = /\{\{([^\{\}]+)\}\}/g; // Improved regex
-  
-  return input.replace(regex, (_, extracted) => { // Capture and use extracted
+  return input.replace(RENDER_TEMPLATE_REGEX, (_, extracted) => {
     const trimmed = extracted.trim();
     const value = props[trimmed];
     
     if (value === undefined || value === null) {
-      return `{{ ${trimmed} }}`;
+      return `{{ ${trimmed} }}`; // keep placeholder for debugging
     }
     
     return shouldSanitize ? sanitizeString(value) : value;
@@ -465,40 +813,72 @@ function renderTemplate(input, props, shouldSanitize) {
 function initiateNuggets(markup, isNugget) {
   const nuggetRegex = /<([A-Z]\w*)\s*\{([\s\S]*?)\}\s*\/>/g;
   
-  if (nuggetRegex.test(markup)) {
-    markup = markup.replace(nuggetRegex, (match) => {
-      const whiteSpaceIndex = match.indexOf(" "),
-        name = match.slice(1, whiteSpaceIndex),
-        data = match.slice(whiteSpaceIndex, -2).trim();
-      let evaluated;
-      try {
-        const d = Function(`return ${data}`)(),
-          instance = nuggets.get(name);
-        if (instance) {
-          evaluated = renderNugget(instance, d);
-        } else {
-          console.error(`QueFlow Error:\nNugget '${name}' is not defined, check whether '${name}' is correctly spelt or is defined.`);
-        }
-      } catch (e) {
-        console.error(`QueFlow Error:\nAn error occured while rendering Nugget '${name}' \n ${e}, \n\nError sourced from: \n\`${match}\``);
-      }
-      return evaluated;
-    });
+  // Shared cache for compiled props (across all calls)
+  if (!initiateNuggets._propsCache) {
+    initiateNuggets._propsCache = new Map();
   }
   
-  return lintPlaceholders(markup, isNugget);
+  const replacedMarkup = markup.replace(nuggetRegex, (match, name, propsString) => {
+    // propsString = the object literal inside { } (trimmed later)
+    const trimmedProps = `{ ${propsString.trim()} }`;
+    const cacheKey = `${propsString.trim()}`;
+    
+    let evaluated;
+    try {
+      // Retrieve or compile the props function
+      let propsFn = initiateNuggets._propsCache.get(cacheKey);
+      if (!propsFn) {
+        propsFn = new Function(`return ${trimmedProps}`);
+        initiateNuggets._propsCache.set(cacheKey, propsFn);
+      }
+      const d = propsFn();
+      const instance = nuggets.get(name);
+      
+      if (instance) {
+        evaluated = renderNugget(instance, d);
+      } else {
+        console.warn(`QueFlow:\nNugget '${name}' is not defined`);
+        evaluated = match; // leave original markup as fallback
+      }
+    } catch (e) {
+      console.warn(`QueFlow:\nAn error occured while rendering Nugget '${name}': ${e}\n\nError sourced from: \`${match}\``);
+      evaluated = match; // keep original on error
+    }
+    return evaluated;
+  });
+  
+  return lintPlaceholders(replacedMarkup, isNugget);
+}
+
+
+
+// Compute DOM depth
+function getDepth(node) {
+  let depth = 0;
+  while (node.parentNode) {
+    depth++;
+    node = node.parentNode;
+  }
+  return depth;
+}
+
+function clearAllNuggetCaches() {
+  initiateNuggets._propsCache?.clear();
+  initiateExtendedNuggets._propsCache?.clear();
 }
 
 const initiateExtendedNuggets = (markup) => {
+  // Step 1: Convert component tags to custom elements with qf-attrs
   const componentRegex = /<(\/?[A-Z]\w*)(\s*\(\{[\s\S]*?}\))?\s*>/g;
-  
-  // First pass: Convert component tags to HTML custom elements
   const convertedMarkup = markup.replace(componentRegex, (match, p1, p2) => {
     const isClosing = match.startsWith('</');
-    const tagName = p1.replace(/([A-Z])/g, '-$1').toLowerCase().replace(/^-/, '');
+    const tagName = p1
+      .replace(/([A-Z])/g, '-$1')
+      .toLowerCase()
+      .replace(/^-/, '');
     
     if (isClosing) {
-      return `</${tagName.slice(2)}>`;
+      return `</${tagName.slice(2)}>`; // keep original closing logic
     }
     
     const attrs = (p2 || '')
@@ -509,71 +889,113 @@ const initiateExtendedNuggets = (markup) => {
     return `<${tagName} qf-attrs="${attrs}">`;
   });
   
-  let finalMarkup = convertedMarkup;
-  // Create temporary DOM
-  const process = () => {
-    const div = document.createElement("div");
-    div.innerHTML = finalMarkup;
+  // Step 2: Parse into a DocumentFragment
+  const range = document.createRange();
+  const fragment = range.createContextualFragment(convertedMarkup);
+  
+  // Props cache (static, shared across calls)
+  if (!initiateExtendedNuggets._propsCache) {
+    initiateExtendedNuggets._propsCache = new Map();
+  }
+  
+  // Step 3: Iteratively replace all qf-attrs elements (including new ones)
+  let hasComponents = true;
+  while (hasComponents) {
+    hasComponents = false;
     
-    // Process elements in reverse order (deepest first)
-    const allElements = div.getElementsByTagName('*');
-    const elements = Array.from(allElements).reverse();
+    // Collect all elements with qf-attrs, deepest first
+    const elements = fragment.querySelectorAll('[qf-attrs]');
+    if (elements.length === 0) break;
     
-    finalMarkup = div.innerHTML;
+    // Convert NodeList to array, sort by depth (descending)
+    const sorted = Array.from(elements).sort((a, b) => {
+      const depthA = getDepth(a);
+      const depthB = getDepth(b);
+      return depthB - depthA; // deepest first
+    });
     
-    for (const element of elements) {
-      if (element.hasAttribute('qf-attrs')) {
-        const originalTag = element.tagName.toLowerCase()
-          .replace(/-([a-z])/g, (_, c) => c.toUpperCase())
-          .replace(/^./, m => m.toUpperCase());
+    for (const element of sorted) {
+      // Only process if still in the DOM (could have been replaced by a parent)
+      if (!element.parentNode) continue;
+      
+      const originalTag = element.tagName.toLowerCase()
+        .replace(/-([a-z])/g, (_, c) => c.toUpperCase())
+        .replace(/^./, m => m.toUpperCase());
+      const attrs = element.getAttribute('qf-attrs');
+      const content = element.innerHTML;
+      const instance = nuggets.get(originalTag);
+      
+      if (!instance) {
+        console.warn(`QueFlow:\nNugget '${originalTag}' is not defined`);
+        element.removeAttribute('qf-attrs');
+        continue;
+      }
+      
+      // Compile props (cached)
+      let data;
+      if (initiateExtendedNuggets._propsCache.has(attrs)) {
+        data = initiateExtendedNuggets._propsCache.get(attrs);
+      } else {
         try {
-          const attrs = element.getAttribute('qf-attrs');
-          const content = element.innerHTML;
-          const originalHTML = element.outerHTML;
-          
-          const data = new Function(`return ${attrs}`)();
-          const instance = nuggets.get(originalTag);
-          if (instance) {
-            const replacement = renderNugget(instance, data, true, content);
-            finalMarkup = finalMarkup.split(originalHTML).join(replacement);
-          } else {
-            console.error(`QueFlow Error:\nNugget '${originalTag}' is not defined, check whether '${originalTag}' is correctly spelt or is defined.`);
-          }
-          
+          data = new Function(`return ${attrs}`)();
+          initiateExtendedNuggets._propsCache.set(attrs, data);
         } catch (e) {
-          console.error(`QueFlow Error rendering ${originalTag}:\n${e}\nIn element:\n${originalHTML}`);
+          console.warn(`QueFlow:\nFailed to parse props for ${originalTag}: ${e}`);
+          element.removeAttribute('qf-attrs');
+          continue;
         }
       }
+      
+      // Render the nugget
+      const replacementHTML = renderNugget(instance, data, true, content);
+      const replacementFragment = range.createContextualFragment(replacementHTML);
+      
+      // Replace the element in‑place
+      element.parentNode.replaceChild(replacementFragment, element);
+      
+      // Since we've inserted new DOM, we need to re‑scan in the next while iteration
+      hasComponents = true;
     }
   }
   
-  process();
-  process();
+  // Step 4: Serialize the final fragment
+  const div = document.createElement('div');
+  div.appendChild(fragment);
+  const finalMarkup = div.innerHTML;
+  div.remove();
+  
+  // Step 5: Let normal nuggets be processed
   return initiateNuggets(finalMarkup);
 };
 
-function initiateComponents(markup, isNugget) {
-  const subRegex = new RegExp("<[A-Z]\\w+\/[>]", "g");
+
+
+// Module‑level regex: matches <UpperCaseName /> (with optional spaces)
+const COMPONENT_SELF_CLOSING_REGEX = /<([A-Z]\w*)\s*\/>/g;
+
+function initiateComponents(markup, isNugget, fromAtom) {
   markup = lintPlaceholders(markup, isNugget);
-  if (subRegex.test(markup) && !isNugget) {
-    markup = markup.replace(subRegex, (match) => {
-      let evaluated, subName;
-      try {
-        subName = match.slice(1, -2);
-        const instance = components.get(subName);
-        if (instance) {
-          evaluated = renderComponent(instance, subName);
-        } else {
-          console.error(`QueFlow Error:\nComponent '${subName}' is not defined, check whether '${subName}' is correctly spelt or is defined.`);
-        }
-        
-      } catch (e) {
-        console.error(`QueFlow Error:\nAn error occured while rendering Component '${subName}' \n ${e}, \n\nError sourced from: \n\`${match}\``);
+  
+  // If not a nugget, replace self-closing component tags with rendered output
+  if (!isNugget) {
+    markup = markup.replace(COMPONENT_SELF_CLOSING_REGEX, (match, tagName) => {
+      const instance = components.get(tagName);
+      if (!instance) {
+        console.warn(`QueFlow:\nComponent '${tagName}' is not defined, check whether '${tagName}' is correctly spelt or is defined.`);
+        return match; // leave original to avoid further breakage
       }
-      return evaluated;
+      if (!fromAtom) {
+        try {
+          return renderComponent(instance, tagName);
+        } catch (e) {
+          console.warn(`QueFlow:\nAn error occured while rendering Component '${tagName}' \n ${e}, \n\nError sourced from: \`${match}\``);
+          return match;
+        }
+      }
     });
   }
   
+  // After components, process nuggets
   markup = initiateNuggets(markup);
   markup = initiateExtendedNuggets(markup);
   
@@ -593,7 +1015,7 @@ function g(str, className) {
 }
 
 const lintPlaceholders = (html, isNugget) => {
-  const attributeRegex = /\w+\s*=\s*\{\{[^}]+\}\}/g; // Simplified regex
+  const attributeRegex = /\w+\s*=\s*\{\{[^}]+\}\}/g;
   const eventRegex = /on\w+\s*=\s*\{\{(.*?)\}\}/gs;
   
   if (eventRegex.test(html) && !isNugget) {
@@ -610,8 +1032,8 @@ const lintPlaceholders = (html, isNugget) => {
   return html;
 };
 
-const removeEvents = (nodeList) => {
-  nodeList.forEach((child) => {
+const removeEvents = (nodeList, shouldRemove) => {
+  for (const child of nodeList) {
     const attributes = getAttributes(child);
     
     for (var { attribute, value } of attributes) {
@@ -620,7 +1042,21 @@ const removeEvents = (nodeList) => {
         child.removeEventListener(attribute, fn);
       }
     }
-  });
+    
+    if (child._qfHandlerKeys) {
+      for (const key of child._qfHandlerKeys) {
+        eventHandlerCache.delete(key);
+      }
+      delete child._qfHandlerKeys; // clean up
+    }
+    
+    const qfid = child.getAttribute('data-qfid');
+    // Remove from reactive cache
+    if (qfid) reactiveCache.delete(qfid);
+    if (shouldRemove) child.remove();
+  };
+  
+  clearAllNuggetCaches();
 }
 
 const renderComponent = (instance, name, flag) => {
@@ -628,17 +1064,12 @@ const renderComponent = (instance, name, flag) => {
     const id = typeof instance.element === 'string' ? instance.element : instance.element.id;
     
     let template = !flag ? `<div id="${id}"> ${(instance.template instanceof Function ? instance.template(instance.data) : instance.template)} </div>` : (instance.template instanceof Function ? instance.template(instance.data) : instance.template);
+    
     template = handleRouter(template);
     template = initiateComponents(template);
     
-    var rendered;
-    if (!flag) {
-      rendered = jsxToHTML(template, instance, name);
-      initiateStyleSheet(`#${id}`, instance);
-    } else {
-      initiateStyleSheet(`#${id}`, instance);
-      rendered = jsxToHTML(template, instance, name);
-    }
+    initiateStyleSheet(`#${id}`, instance);
+    const rendered = jsxToHTML(template, instance, name);
     
     instance.dataQF = rendered[1];
     instance.isMounted = true;
@@ -650,57 +1081,43 @@ const renderComponent = (instance, name, flag) => {
 
 class App {
   constructor(selector = "", options = {}) {
-    // Stores the element associated with a component
-    this.element = typeof selector == "string" ? document.querySelector(selector) : selector;
+    this.element = typeof selector == "string" ?
+      document.querySelector(selector) :
+      selector;
     
-    if (!this.element) throw new Error("QueFlow Error:\nElement selector '" + selector + "' is invalid");
-    this.upTime = 0;
-    // Creates a reactive signal for the component's data.
+    if (!this.element) {
+      throw new Error("QueFlow:\nElement selector '" + selector + "' is invalid");
+    }
+    
+    // Reactive state
     this.data = createSignal(options.data, this);
-    
-    // Asigns the value of this.data' to _data
     let _data = this.data;
     
-    // Stores the options provided to the component.
     this.options = options;
-    
-    // Stores the current 'freeze status' of the component
     this.isFrozen = false;
-    
-    
-    // Stores the component's stylesheet 
     this.stylesheet = options.stylesheet;
-    
-    // Stores the component's reactive elements data
     this.dataQF = [];
-    
     this.onUpdate = options.onUpdate;
-    
     this.created = options.created;
     this.run = options.run || (() => {});
-    
     this.useStrict = Object.keys(options).includes('useStrict') ? options.useStrict : true;
     
-    let id = this.element.id;
-    if (!id) throw new Error("QueFlow Error:\nTo use component scoped stylesheets, component's mount node must have a valid id");
+    // Batched rendering queue
+    this._renderPending = false;
+    this._renderScheduled = false;
     
-    // qà a component's stylesheet 
     initiateStyleSheet("", this);
     
-    // Defines properties for the component instance.
     Object.defineProperties(this, {
       template: { value: this.options.template },
       data: {
-        // Getters and setters for 'data' property 
-        get: () => {
-          return _data;
-        },
+        get: () => _data,
         set: (data) => {
-          // If 'data' is not same as 'this.data' and component is not frozem
           if (!isSame(data, this.data) && !this.isFrozen) {
             _data = createSignal(data, this);
             this.dataQF = filterNullElements(this.dataQF);
-            this.render();
+            // ✅ Schedule a batched render
+            this._scheduleRender();
           }
           return true;
         },
@@ -708,27 +1125,49 @@ class App {
       }
     });
     
-    if (this.created)
+    if (this.created) {
       this.created(this.data);
-    
+    }
   }
   
-  render() {
-    let el = this.element;
-    // Checks if the component's template is a string or a function.
-    let template = this.template instanceof Function ? this.template(this.data) : this.template;
+  // Schedule a render using microtask – if multiple changes happen
+  // synchronously, only one render occurs.
+  _scheduleRender() {
+    if (!this._renderPending) {
+      this._renderPending = true;
+      queueMicrotask(() => {
+        this._renderPending = false;
+        this._doRender();
+      });
+    }
+  }
+  
+  // The actual render logic, now private
+  _doRender() {
+    let template = this.template instanceof Function ?
+      this.template(this.data) :
+      this.template;
+    
     template = handleRouter(template);
-    // Initiate sub-components if they are available 
     template = initiateComponents(template);
     
-    // Convert template to html 
-    let rendered = jsxToHTML(template, this);
-    // Set innerHTML attribute of component's element to the converted template
-    el.innerHTML = rendered[0];
+    // Convert template to HTML (still returns a string)
+    const rendered = jsxToHTML(template, this);
+    const htmlString = rendered[0];
+    
+    const fragment = document.createRange().createContextualFragment(htmlString);
+    
+    // Clear the element efficiently (no innerHTML = '')
+    while (this.element.firstChild) {
+      this.element.firstChild.remove();
+    }
+    
+    this.element.appendChild(fragment);
+    
     currentComponent?.navigateFunc(currentComponent.data);
     
     this.dataQF = rendered[1];
-    handleEventListener(el, this);
+    handleEventListener(this.element, this);
     
     for (const component of components) {
       const instance = component[1];
@@ -738,24 +1177,37 @@ class App {
       instance.run(instance.data);
     }
     
-    this.run(this.data)
+    this.run(this.data);
+  }
+  
+  // Force an immediate render (skip batching) – rarely needed
+  render() {
+    // Cancel any pending microtask to avoid double render
+    this._renderPending = false;
+    this._doRender();
   }
   
   freeze() {
-    // Freezes component
     this.isFrozen = true;
   }
   
   unfreeze() {
-    // Unfreezes component
     this.isFrozen = false;
   }
   
-  // removes the component's element from the DOM
   destroy() {
-    const parent = [this.element, ...this.element.querySelectorAll('*')];
-    removeEvents(parent);
+    // ✅ Optimized descendant collection
+    const allNodes = [this.element];
+    const walker = document.createTreeWalker(
+      this.element,
+      NodeFilter.SHOW_ELEMENT
+    );
+    let node;
+    while ((node = walker.nextNode())) {
+      allNodes.push(node);
+    }
     
+    removeEvents(allNodes);
     this.element.remove();
   }
 }
@@ -771,102 +1223,127 @@ class Component {
     this.template = options?.template;
     this.run = options.run || (() => {});
     this.navigateFunc = options.onNavigate || (() => {});
-    if (!this.template) throw new Error("QueFlow Error:\nTemplate not provided for Component " + name);
+    if (!this.template) throw new Error("QueFlow:\nTemplate not provided for Component " + name);
     
-    this.element = `qfEl${counterQF}`;
+    this.element = `qfEl${counterQF}`; // string ID – later resolved to DOM node
     counterQF++;
     this.isMounted = false;
-    // Creates a reactive signal for the Component's data.
-    this.data = createSignal(options.data, this);
     
-    // Asigns the value of this.data' to _data
+    // Reactive state
+    this.data = createSignal(options.data, this);
     let _data = this.data;
     
-    // Stores the options provided to the component.
     this.options = options;
-    
-    // Stores the current 'freeze status' of the Component
     this.isFrozen = false;
-    
-    // Stores the id of the Component's mainelement 
-    this.elemId = "";
-    
     this.created = options.created;
-    
-    // Stores the Component's stylesheet 
     this.stylesheet = options.stylesheet;
-    
-    // Stores the Component's reactive elements data
     this.dataQF = [];
-    
     this.onUpdate = options.onUpdate;
-    
     this.useStrict = Object.keys(options).includes('useStrict') ? options.useStrict : true;
     
-    // Defines data property for the Component instance.
+    // Batched rendering queue (microtask‑based)
+    this._renderPending = false;
+    
+    // Define data property with batched setter
     Object.defineProperties(this, {
       data: {
-        // Getters and setters for 'data' property 
-        get: () => {
-          return _data;
-        },
+        get: () => _data,
         set: (data) => {
-          // If 'data' is not same as 'this.data' and component is not frozem
           if (!isSame(data, this.data) && !this.isFrozen) {
             _data = createSignal(data, this);
             this.dataQF = filterNullElements(this.dataQF);
-            renderComponent(this, this.name);
+            // ✅ Schedule a batched render (microtask)
+            this._scheduleRender();
           }
           return true;
         },
-        configurable: true,
-        mutable: false
+        configurable: true
       }
     });
     
-    if (this.created) this.created();
-    components.set(name, this)
+    if (this.created) this.created(this.data);
+    components.set(name, this);
+  }
+  
+  // Schedule render via microtask – coalesce multiple data changes
+  _scheduleRender() {
+    if (!this._renderPending) {
+      this._renderPending = true;
+      queueMicrotask(() => {
+        this._renderPending = false;
+        // Guard: don't render if the component has been destroyed or unmounted
+        if (this.element && this.element.isConnected) {
+          renderComponent(this, this.name);
+        }
+      });
+    }
+  }
+  
+  // Force an immediate render (skip batching) – rarely needed
+  renderNow() {
+    this._renderPending = false; // cancel any queued microtask
+    renderComponent(this, this.name);
   }
   
   freeze() {
-    // Freezes component
     this.isFrozen = true;
   }
   
   unfreeze() {
-    // Unfreezes component
     this.isFrozen = false;
   }
   
-  // Shows component 
   show() {
-    if (this.element.style.display !== 'block') {
-      this.element.style.display = 'block'
+    // Guard already present – keep it. If element is a string, skip.
+    const el = this._resolveElement();
+    if (el && el.style.display !== 'block') {
+      el.style.display = 'block';
     }
   }
-  // Hides component
+  
   hide() {
-    if (this.element.style.display !== 'none') {
-      this.element.style.display = 'none'
+    const el = this._resolveElement();
+    if (el && el.style.display !== 'none') {
+      el.style.display = 'none';
     }
   }
   
   mount() {
     if (!this.isMounted) {
-      let rendered = renderComponent(this, this.name, true);
-      this.element.innerHTML = rendered;
-      handleEventListener(this.element, this);
+      const rendered = renderComponent(this, this.name, true);
+      
+      const fragment = document.createRange().createContextualFragment(rendered);
+      const el = this._resolveElement();
+      if (el) {
+        // Clear any existing content quickly
+        while (el.firstChild) el.firstChild.remove();
+        el.appendChild(fragment);
+      }
+      handleEventListener(el || this.element, this);
       this.isMounted = true;
     }
   }
   
-  // removes the component's element from the DOM
   destroy() {
-    const all = [this.element, ...this.element.querySelectorAll('*')];
-    // Removes event listeners attached to the component's element and its child nodes
-    removeEvents(all);
+    // Descendant collection with TreeWalker
+    const el = this._resolveElement();
+    if (!el) return;
     
-    this.element.remove();
+    const allNodes = [el];
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_ELEMENT);
+    let node;
+    while ((node = walker.nextNode())) {
+      allNodes.push(node);
+    }
+    removeEvents(allNodes);
+    el.remove();
+  }
+  
+  _resolveElement() {
+    if (typeof this.element === 'string') {
+      return document.querySelector(`[qfid="${this.element}"]`) || null;
+    }
+    return this.element;
   }
 }
 
@@ -908,86 +1385,106 @@ class Atom {
     this.dataQF = [];
     this.useStrict = true;
     this.isReactive = options.isReactive;
-    this.created = typeof options == "Function" ? options.created(this) : 0;
+    this.created = typeof options.created == "function" ? options.created(this) : 0;
+  }
+  
+  // Resolve string ID to DOM element once and cache it
+  _getElement() {
+    if (typeof this.element === "string") {
+      this.element = document.getElementById(this.element);
+      if (!this.element) throw new Error(`Mount node of '${this.name}' is invalid or not provided`);
+    }
+    return this.element;
+  }
+  
+  // Optionally clear the container (if needed externally)
+  destroy() {
+    const el = this._getElement();
+    removeEvents([el.firstChild, ...el.firstChild.querySelectorAll('*')]);
+    el.firstChild.remove();
+    
+    this.data = [];
+    this.dataQF = [];
   }
   
   renderWith(data, position = "append") {
-    if (typeof data !== "object") throw new Error(`First argument passed to '${this.name}.renderWith()' must be an object or an array.`);
+    if (typeof data !== "object")
+      throw new Error(`First argument passed to '${this.name}.renderWith()' must be an object or an array.`);
     
-    this.element = typeof this.element === "string" ? document.getElementById(this.element) : this.element;
+    const el = this._getElement();
+    const dataArray = Array.isArray(data) ? data : [data];
+    if (dataArray.length === 0) return;
     
-    if (!this.element) throw new Error(`Mount node of '${this.name}' is invalid or not provided`);
+    this.data = dataArray.slice(); // shallow copy
     
-    let rendered = "";
-    if (this.isReactive) {
-      this.data = data;
-      const processData = (item) => {
-        const template = typeof this.template === "function" ? this.template(item, this.index) : this.template;
-        const indexedTemplate = addIndexToTemplate(template, this.index);
-        const init = initiateComponents(indexedTemplate);
-        rendered = position == "append" ? rendered + init : init + rendered;
-        this.index++;
-      };
+    // Build one combined HTML string from all items
+    let combinedHTML = '';
+    
+    for (let i = 0; i < dataArray.length; i++) {
+      const item = dataArray[i];
+      const rawTemplate = typeof this.template === "function" ?
+        this.template(item, i) :
+        this.template;
       
-      if (Array.isArray(data)) {
-        data.forEach(processData);
+      const indexedTemplate = addIndexToTemplate(rawTemplate, i);
+      
+      if (this.isReactive) {
+        // Expand components/nuggets before concatenation
+        combinedHTML += initiateComponents(indexedTemplate, false, true);
       } else {
-        processData(data);
+        // Non‑reactive: simple placeholder replacement + linting
+        let rendered = renderTemplate(indexedTemplate, item, true);
+        rendered = initiateNuggets(rendered);
+        rendered = initiateExtendedNuggets(rendered);
+        const linted = lintPlaceholders(rendered, true);
+        combinedHTML += linted;
       }
-      
-      const [htmlContent, componentData] = jsxToHTML(rendered, this, null, false);
-      
-      const template = stringToDocumentFragment(htmlContent);
-      position == "append" ? this.element.appendChild(template) : this.element.prepend(template);
-      handleEventListener(this.element, this);
-      this.dataQF.push(...componentData);
+    }
+    
+    // Single parse & reactive processing
+    const [htmlContent, compData] = jsxToHTML(combinedHTML, this, null);
+    const fragment = stringToDocumentFragment(htmlContent);
+    
+    // Insert once
+    if (position === "append") {
+      el.appendChild(fragment);
     } else {
-      let result = "";
-      if (Array.isArray(data)) {
-        data.forEach((item) => {
-          const template = typeof this.template === "function" ? this.template(item, this.index) : this.template;
-          result = position == "append" ? result + renderTemplate(template, item, true) : renderTemplate(template, item, true) + result;
-        });
-      } else {
-        const template = typeof this.template === "function" ? this.template(data, this.index) : this.template;
-        result = renderTemplate(template, data, true);
-      }
-      result = jsxToHTML(lintPlaceholders(result, true), this, null)[0];
-      const template = stringToDocumentFragment(result);
-      position == "append" ? this.element.appendChild(template) : this.element.prepend(template);
-      handleEventListener(this.element, this);
+      el.prepend(fragment);
+    }
+    
+    handleEventListener(el, this);
+    
+    if (this.isReactive) {
+      this.dataQF.push(...compData);
     }
   }
   
   set(index, value, allowShallow) {
     if (!this.isReactive) throw new Error(`Cannot call 'set()' on Atom ${this.name}.\n\n${this.name} is not a reactive Atom`);
     
-    const shallowUpdate = (indx, val) => {
-      const keys = Object.keys(val);
-      
-      keys.forEach((key) => {
-        if (this.data[indx][key] !== val[key]) {
-          this.data[indx][key] = val[key];
+    // ---- Apply data changes synchronously ----
+    if (typeof index === "number") {
+      if (allowShallow) {
+        // Shallow merge: update only the given keys in the existing data object
+        const target = this.data[index];
+        if (target && typeof target === "object") {
+          Object.keys(value).forEach(key => {
+            if (target[key] !== value[key]) target[key] = value[key];
+          });
+        } else {
+          this.data[index] = value;
         }
-      });
-      
-      updateComponent("_", this);
-    }
-    
-    if (typeof index == "number") {
-     if (allowShallow) {
-       shallowUpdate(index, value)
-     } else {
-       this.data[index] = value;
-       updateComponent("_", this);
-     }
-     
+      } else {
+        this.data[index] = value;
+      }
     } else if (Array.isArray(index)) {
       this.data = index;
-      updateComponent("_", this);
     } else {
-      console.error(`First Argument passed to '${this.name}.set()' must either be a number or an array.`);
+      console.warn(`First Argument passed to '${this.name}.set()' must either be a number or an array.`);
+      return;
     }
+    
+    updateComponent("_", this);
   }
 }
 
@@ -1041,6 +1538,12 @@ class Nugget {
     this.template = options.template;
     this.stylesheetInitiated = false;
     nuggets.set(name, this)
+  }
+  
+  destroy() {
+    const all = document.querySelectorAll(`.${this.className}`);
+    // Remove elements and their events from the DOM
+    removeEvents(all, true);
   }
 }
 

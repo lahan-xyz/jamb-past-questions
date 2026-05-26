@@ -1,8 +1,8 @@
-// QuestionCard.js
 import { Atom } from 'queflow'
+import Text from '../nuggets/Text.js'
 
 const QuestionCard = new Atom("QuestionCard", {
-  template: (props, index) => {
+  template: () => {
     return (`
     <div class="qc-card">
       <div class="qc-header">
@@ -18,7 +18,7 @@ const QuestionCard = new Atom("QuestionCard", {
       </div>
 
       <div class="qc-body">
-        <p class="qc-text">{{ question }}</p>
+        <p class="qc-text" q:text="{{ question }}"></p>
         <div class="qc-options">
           <button class="qc-opt" data-letter="A">
             <span class="qc-opt-letter">A</span>
@@ -132,7 +132,7 @@ const QuestionCard = new Atom("QuestionCard", {
       gap: 1.4rem;
     `,
     ".qc-text": `
-      font-size: 1.15rem;
+      font-size: 1.05rem;
       font-weight: 450;
       line-height: 1.75;
       color: #e4e4e7;
@@ -157,7 +157,7 @@ const QuestionCard = new Atom("QuestionCard", {
       cursor: pointer;
       transition: background 0.15s, border-color 0.15s, transform 0.15s;
       color: #ccc;
-      font-size: 0.95rem;
+      font-size: 0.90rem;
       font-weight: 450;
       position: relative;
     `,
