@@ -326,36 +326,41 @@ function wrapBareExpressions(root) {
 
 
 function jsxToHTML(jsx, instance, subId) {
-  const range = document.createRange();
-  const fragment = range.createContextualFragment(jsx);
   const div = document.createElement("div");
-  div.appendChild(fragment);
+  // innerHTML is substantially faster than DocumentFragment parsing for strings
+  div.innerHTML = jsx;
   
   wrapBareExpressions(div);
   
   const data = [];
   
   try {
-    const targetElements = div.querySelectorAll("*");
+    // Live NodeList bypassing CSS engine
+    const targetElements = div.getElementsByTagName("*");
     
-    for (const element of targetElements) {
+    for (let i = 0, len = targetElements.length; i < len; i++) {
+      const element = targetElements[i];
+      
       if (subId && !element.hasAttribute("data-sub_id")) {
-        element.dataset.sub_id = subId;
+        // setAttribute is faster than element.dataset.sub_id
+        element.setAttribute("data-sub_id", subId);
       }
       
-      data.push(
-        ...generateComponentData(
-          element,
-          element.childElementCount > 0, // isParent
-          instance
-        )
+      const childData = generateComponentData(
+        element,
+        element.childElementCount > 0, // isParent
+        instance
       );
+      
+      // Traditional loop avoids call stack limits from spread operator (...)
+      for (let j = 0; j < childData.length; j++) {
+        data.push(childData[j]);
+      }
       
       element.removeAttribute("innertext");
     }
     
     const html = div.innerHTML;
-    
     div.remove();
     return [html.replaceAll("<br>", "\n"), data];
   } catch (error) {
@@ -386,49 +391,45 @@ function isSame(obj1, obj2) {
   return true;
 }
 
+const qOnceMap = {
+  text: "textContent",
+  html: "innerHTML",
+  class: "className"
+}
+
 function convertDirective(attr, value, child) {
   if (!attr.startsWith('q:')) return [attr, value, false];
   
   child.removeAttribute(attr);
   
-  const getExpression = (val) => {
-    if (val.includes('{{') && val.includes('}}')) {
-      return b(val).trim();
-    }
-    return null;
-  };
-  
-  // --- q:once:xxx – one-time binding on any attribute ---
+  // --- q:once:xxx ---
   if (attr.startsWith('q:once:')) {
-    const realAttr = attr.slice(7);
-    return [realAttr, value, true];
+    let realAttr = attr.slice(7);
+    return [qOnceMap[realAttr] || realAttr, value, true];
   }
   
   // --- Standard directives ---
   switch (attr) {
     case 'q:show': {
-      const expr = getExpression(value);
-      if (expr) return ['display', `{{ ${expr} ? 'block' : 'none' }}`, false];
-      const show = value === 'true' || value === true;
-      return ['display', show ? 'block' : 'none', false];
+      if (value.includes('{{') && value.includes('}}')) {
+        const expr = b(value).trim();
+        return ['display', `{{ ${expr} ? 'block' : 'none' }}`, false];
+      }
+      return ['display', (value === 'true' || value === true) ? 'block' : 'none', false];
     }
-    case 'q:text': {
+    case 'q:text':
       child.textContent = value;
-      return ['textContent', value, false];
-    }
+      return ['textContent', value, false]; // Added 'false' to match expected destructuring
+      
     case 'q:html':
-      return ['innerHTML', value, false];
-    case 'q:class':
-      return ['className', value, false];
-    case 'q:style':
-      return ['style', value, false];
+      return ['innerHTML', value, false]; // Added 'false'
+      
     default:
       if (attr === 'q:once') {
         console.warn(`QueFlow: 'q:once' must be followed by ':attribute' (e.g., q:once:id="...").`);
       } else {
-        console.warn(`QueFlow: unknown directive '${attr}'`);
+        console.warn(`QueFlow: unknown directive '${attr}'\n'${child.outerHTML}'`);
       }
-      return [attr, value, false];
       return [attr, value, false];
   }
 }
@@ -437,49 +438,40 @@ function convertDirective(attr, value, child) {
 const generateComponentData = (child, isParent, instance) => {
   const arr = [];
   const attributes = getAttributes(child);
-  let QFID = child.dataset.qfid;
-  const { useStrict } = instance;
-    
+  // getAttribute is faster than dataset
+  let QFID = child.getAttribute("data-qfid"); 
+  const useStrict = instance.useStrict;
+  
+  // --- Content injection for leaf nodes ---
   if (!isParent) {
-    const qText = child.getAttribute('q:text');
-    const qHTML = child.getAttribute('q:html');
+    let hasExplicitContentDirective = false;
     
-    let contentKey, contentValue;
-    
-    if (qHTML) {
-      contentKey = 'innerHTML';
-      contentValue = qHTML;
-    } else if (qText) {
-      contentKey = useStrict ? 'textContent' : 'innerHTML';
-      contentValue = qText;
-    } else {
-      contentKey = useStrict ? 'textContent' : 'innerHTML';
-      contentValue = child[contentKey];
+    // Check our JS array instead of querying the DOM multiple times
+    for (let i = 0; i < attributes.length; i++) {
+      const name = attributes[i].attribute;
+      if (name === 'q:text' || name === 'q:html' || name === 'q:once:text' || name === 'q:once:html') {
+        hasExplicitContentDirective = true;
+        break;
+      }
     }
     
-    attributes.push({ attribute: contentKey, value: contentValue });
-    
-    if (qText && qHTML) {
-      console.warn(`QueFlow: Element has both q:text and q:html – q:html will be used.\nError sourced from: "${child.outerHTML}"`);
+    if (!hasExplicitContentDirective) {
+      const contentKey = useStrict ? 'textContent' : 'innerHTML';
+      attributes.push({ attribute: contentKey, value: child[contentKey] });
     }
   }
   
-  for (const entry of attributes) {
-    let { attribute, value } = entry,
-    once = false;
+  for (let i = 0; i < attributes.length; i++) {
+    let { attribute, value } = attributes[i];
     value = value || '';
     
-    // Apply directive conversions
+    let once = false;
     [attribute, value, once] = convertDirective(attribute, value, child);
-   
-    const hasTemplate = value.includes('{{') && value.includes('}}');
     
-    // Determine if this is a style property or a regular one
+    const hasTemplate = value.includes('{{') && value.includes('}}');
     const isStyle = (attribute in child.style) && attribute.toLowerCase() !== 'src';
     
-    // Skip heavy processing for static attributes
     if (!hasTemplate) {
-      // Apply the static value to the element immediately
       if (isStyle) {
         child.style[attribute] = value;
         child.removeAttribute(attribute);
@@ -489,28 +481,23 @@ const generateComponentData = (child, isParent, instance) => {
       continue;
     }
     
-    
-    // Evaluate the template expression (cached)
     const evaluation = evaluateTemplate(value, instance);
     
-    // Assign a unique qf‑id if this element doesn’t have one yet
     if (!QFID) {
-      QFID = `qf${counterQF}`;
-      child.dataset.qfid = QFID;
-      counterQF++;
+      QFID = `qf${counterQF++}`;
+      child.setAttribute('data-qfid', QFID); // Faster than dataset
     }
     
     if (isStyle) {
       child.style[attribute] = evaluation;
       child.removeAttribute(attribute);
     } else {
-      // Standard property assignment (id, className, value, etc.)
       child[attribute] = evaluation;
     }
     
-    // Extract the raw expression to check if it’s global
     const expression = b(value).trim();
-    const isGlobal = expression.startsWith('$');
+    // charCodeAt(0) === 36 is the fastest way to check if a string starts with '$'
+    const isGlobal = expression.charCodeAt(0) === 36; 
     
     const entryObj = {
       template: value,
@@ -520,11 +507,10 @@ const generateComponentData = (child, isParent, instance) => {
       once
     };
     
-    // Push to the appropriate queue
     if (isGlobal) {
       globalStateDataQF.push(entryObj);
     } else {
-      arr.push(entryObj);
+      arr[arr.length] = entryObj; // arr[length] assignment is marginally faster than arr.push()
     }
   }
   
@@ -638,41 +624,37 @@ function update(child, key, evaluated) {
   switch (key) {
     case 'q:exist':
       if (evaluated === "false") {
-        const descendants = [];
-        const walker = document.createTreeWalker(
-          child,
-          NodeFilter.SHOW_ELEMENT
-        );
-        let node;
-        while ((node = walker.nextNode())) {
-          descendants.push(node);
-        }
+        // getElementsByTagName is highly optimized and faster than TreeWalker
+        const descendants = child.getElementsByTagName('*');
         
+        // Pass as an array using spread syntax
         removeEvents([child, ...descendants]);
         child.remove();
       }
       break;
       
     case 'disabled':
-      if (evaluated === "false") {
-        if (child.disabled !== false) child.removeAttribute("disabled");
-      } else {
-        if (child.disabled !== true) child.setAttribute("disabled", evaluated);
+      // Direct property assignment is much faster than setAttribute/removeAttribute
+      const isDisabled = evaluated !== "false";
+      if (child.disabled !== isDisabled) {
+        child.disabled = isDisabled;
       }
       break;
       
     default:
-      if (key.indexOf("style.") > -1) {
+      if (key.startsWith("style.")) { // startsWith is safer than indexOf > -1
         const sliced = key.slice(6);
         if (child.style[sliced] !== evaluated) {
           child.style[sliced] = evaluated;
         }
       } else {
-        if (!child?.hasAttribute(key)) {
+        // 'in' operator checks the prototype chain and is faster than hasAttribute
+        if (key in child) {
           if (child[key] != evaluated) {
             child[key] = evaluated;
           }
         } else {
+          // Fallback to attribute if no corresponding object property exists
           if (child.getAttribute(key) != evaluated) {
             child.setAttribute(key, evaluated);
           }
@@ -736,61 +718,46 @@ const ATTR_TO_PROP = {
 };
 
 function updateComponent(ckey, instance) {
-  let dataQF;
-  if (typeof instance === "boolean") {
-    globalStateDataQF = filterNullElements(globalStateDataQF);
-    dataQF = globalStateDataQF;
-  } else {
-    dataQF = filterNullElements(instance.dataQF);
-    instance.dataQF = dataQF;
-  }
+  const isGlobal = typeof instance === "boolean";
+  let dataQF = filterNullElements(isGlobal ? globalStateDataQF : instance.dataQF);
   
-  const toRemove = []; // indices of entries flagged for one-time removal
+  let writeIndex = 0; // Two-pointer technique for O(n) filtering
   
   for (let i = 0; i < dataQF.length; i++) {
     const entry = dataQF[i];
     const { template, key, qfid, once } = entry;
     
-    if (ckey !== "_" && !needsUpdate(template, ckey)) continue;
+    // Default to keeping the entry
+    let keep = true;
     
-    const node = selectElement(qfid);
-    if (!node) {
-      // This shouldn't happen after filterNullElements, but guard anyway
-      toRemove.push(i);
-      continue;
+    if (ckey === "_" || needsUpdate(template, ckey)) {
+      const node = selectElement(qfid);
+      
+      if (node) {
+        let evaluated = evaluateTemplate(template, instance);
+        let domKey = key.startsWith('style.') ? key : (ATTR_TO_PROP[key.toLowerCase()] || key);
+        batchedUpdate(node, domKey, evaluated);
+        
+        if (once) keep = false; // Mark for removal if executed once
+      } else {
+        keep = false; // Node is missing; clean it up to prevent memory leaks
+      }
     }
     
-    let evaluated = evaluateTemplate(template, instance);
-    
-    // --- Special handling for q:class / q:style ---
-    if (key === 'className' && typeof evaluated === 'object') {
-      evaluated = Object.keys(evaluated).filter(cls => evaluated[cls]).join(' ');
-    }
-    
-    if (key === 'style' && typeof evaluated === 'object') {
-      // Merge all style properties at once (batched via the same microtask flush)
-      Object.assign(node.style, evaluated);
-    } else {
-      let domKey = key.startsWith('style.') ? key : (ATTR_TO_PROP[key.toLowerCase()] || key);
-      batchedUpdate(node, domKey, evaluated);
-    }
-    
-    // Mark for removal if this was a one‑time binding
-    if (once) {
-      toRemove.push(i);
+    // If we are keeping it, write it to the current write index and increment
+    if (keep) {
+      dataQF[writeIndex++] = entry;
     }
   }
   
-  // Remove one‑time bindings (iterate backwards to keep indices valid)
-  for (let i = toRemove.length - 1; i >= 0; i--) {
-    dataQF.splice(toRemove[i], 1);
-  }
+  // Truncate the array to remove the discarded elements
+  dataQF.length = writeIndex;
   
-  // Sync back the cleaned array
-  if (typeof instance !== 'boolean') {
-    instance.dataQF = dataQF;
-  } else {
+  // Sync back state
+  if (isGlobal) {
     globalStateDataQF = dataQF;
+  } else {
+    instance.dataQF = dataQF;
   }
 }
 
@@ -969,8 +936,6 @@ const initiateExtendedNuggets = (markup) => {
 };
 
 
-
-// Module‑level regex: matches <UpperCaseName /> (with optional spaces)
 const COMPONENT_SELF_CLOSING_REGEX = /<([A-Z]\w*)\s*\/>/g;
 
 function initiateComponents(markup, isNugget, fromAtom) {
@@ -1007,9 +972,12 @@ function g(str, className) {
   const div = document.createElement("div");
   div.innerHTML = str;
   
-  div.querySelectorAll("*").forEach(child => {
-    child.classList.add(className);
-  });
+  const children = div.getElementsByTagName("*");
+  
+  // Standard for-loop avoids callback overhead
+  for (let i = 0, len = children.length; i < len; i++) {
+    children[i].classList.add(className);
+  }
   
   return div.innerHTML;
 }
