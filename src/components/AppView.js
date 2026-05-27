@@ -8,7 +8,7 @@ const SUBJECTS = ['Mathematics', 'English', 'Chemistry', 'Physics']
 const YEARS = Array.from({ length: 2025 - 1978 + 1 }, (_, i) => 1978 + i)
 
 async function loadSubject(subject, year) {
-  const module = await import(`../scraper/past-questions/${subject.toLowerCase()}.js`);
+  const module = await import(`https://esm.sh/gh/lahan-xyz/jamb-past-questions/src/scraper/past-questions/${subject.toLowerCase()}.js`);
   return module.default[`year_${year}`] || [];
 }
 
