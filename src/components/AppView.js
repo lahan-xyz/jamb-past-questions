@@ -73,7 +73,6 @@ const AppView = new Component("AppView", {
   async run() {
     // Initial load
     await this.loadAndRender()
-    // q:show, q:text, q:html, q:once:attr, q:class, q:style
   },
   
   template: (data) => `

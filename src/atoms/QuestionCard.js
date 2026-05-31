@@ -14,7 +14,7 @@ const QuestionCard = new Atom("QuestionCard", {
       </div>
 
       <div class="qc-image-wrap" q:show="{{ src }}">
-        <img class="qc-image" src="../src/scraper/images/{{ src }}" alt="{{ year }} Question diagram" />
+        <img class="qc-image" src="../src/scraper/images/{{ src }}" loading="lazy" alt="{{ year }} Question diagram" />
       </div>
 
       <div class="qc-body">
@@ -118,7 +118,7 @@ const QuestionCard = new Atom("QuestionCard", {
     `,
     ".qc-image": `
       width: 100%;
-      height: auto;
+      min-height: 50px;
       display: block;
       background: #0a0a0f;
       object-fit: contain;
