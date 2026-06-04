@@ -148,7 +148,7 @@ const globalState = (name, val, shouldStore) => {
     cache.set(obj, proxy);
     return proxy;
   };
- 
+  
   globalThis[name] = reactiveObj(obj);
 };
 
@@ -200,14 +200,14 @@ function createSignal(data, object) {
   return createReactiveObject(item);
 }
 
-const b = str => stringBetween(str, "{{", "}}");
+const b = (str, last) => stringBetween(str, "[", "]", last);
 
 
 // Extracts the string between two delimiters in a given string.
-function stringBetween(str, f, s) {
+function stringBetween(str, f, s, lastIndex) {
   const indx1 = str.indexOf(f);
   if (indx1 === -1) return "";
-  const indx2 = str.indexOf(s, indx1 + f.length);
+  const indx2 = !lastIndex ? str.indexOf(s, indx1 + f.length) : str.lastIndexOf(s);
   if (indx2 === -1) return "";
   return str.slice(indx1 + f.length, indx2);
 }
@@ -271,61 +271,112 @@ function buildDependencyMap(instance, data) {
 
 
 
-const EVAL_REGEX = /\{\{(.+?)\}\}/g;
-const ENTITY_REGEX = /&(gt|lt);/g;
+const lexerCache = new Map();
 
+function lexTemplate(templateString) {
+  // 1. Full-String Memoization: Skip parsing entirely if we've seen this string
+  if (lexerCache.has(templateString)) {
+    return lexerCache.get(templateString);
+  }
+  
+  const arr = [];
+  let depth = 0;
+  let inQuote = false;
+  let quoteChar = null;
+  let startIdx = -1;
+  
+  for (let i = 0; i < templateString.length; i++) {
+    const char = templateString[i];
+    
+    // Quote Tracking (Ignore brackets inside strings)
+    if ((char === '"' || char === "'" || char === '`') && templateString[i - 1] !== '\\') {
+      if (!inQuote) {
+        inQuote = true;
+        quoteChar = char;
+      } else if (quoteChar === char) {
+        inQuote = false;
+        quoteChar = null;
+      }
+    }
+    
+    // Bracket Tracking
+    if (!inQuote) {
+      if (char === '[') {
+        if (depth === 0) startIdx = i;
+        depth++;
+      } else if (char === ']') {
+        depth--;
+        
+        if (depth === 0) {
+          arr.push(templateString.slice(startIdx + 1, i));
+        }
+      }
+    }
+  }
+  
+  // Cache the complete result for this exact template string
+  lexerCache.set(templateString, arr);
+  return arr;
+}
+
+const ENTITY_REGEX = /&(gt|lt);/g;
 const evaluatorCache = new Map();
 
 function evaluateTemplate(templateString, instance) {
-  const evaluated = templateString.replace(EVAL_REGEX, (match, innerContent) => {
-    currentTemplate = match;
+  const lexed = lexTemplate(templateString);
+  
+  // Fast exit to save execution time
+  if (lexed.length === 0) return templateString;
+  
+  let evaluated = templateString;
+  
+  // Standard 'for' loop is slightly faster than 'for...of' in heavy execution paths
+  for (let i = 0; i < lexed.length; i++) {
+    const innerContent = lexed[i];
+    
+    // Reactivity dependency tracking
+    currentTemplate = innerContent;
+    
     const ext = innerContent.replace(ENTITY_REGEX, (_, entity) =>
       entity === 'gt' ? '>' : '<'
     ).trim();
     
-    if (!ext) return match;
+    if (!ext) continue;
     
-    const isGlobal = ext.charCodeAt(0) === 36;
+    const isGlobal = ext.charCodeAt(0) === 36; // Faster check for '$'
     const cacheKey = `eval:${ext}`;
     
     let evaluator = evaluatorCache.get(cacheKey);
     
     if (!evaluator) {
       try {
-        let source;
-        
-        if (isGlobal) {
-          source = `return ${ext}`;
-        } else {
-          source = `
-            with (this.data) {
-              return ${ext};
-            }
-          `;
-        }
+        const source = isGlobal ?
+          `return ${ext};` :
+          `with (this.data) { return ${ext}; }`;
         
         evaluator = new Function(source);
         evaluatorCache.set(cacheKey, evaluator);
       } catch (err) {
-        console.warn(`QueFlow Syntax Error compiling: \`${ext}\`\n`, err);
-        return match;
+        console.warn(`QueFlow Syntax Error compiling: \`${innerContent}\`\n`, err);
+        continue;
       }
     }
     
     try {
       const parsed = isGlobal ? evaluator() : evaluator.call(instance);
       
-      // Falsy check
-      if ((parsed === undefined || parsed === null || Number.isNaN(parsed)) && parsed !== "0") {
-        return match;
+      // Strict nullish check covers both undefined and null. isNaN catches Math failures.
+      if (parsed == null || Number.isNaN(parsed)) {
+        continue;
       }
       
-      return parsed;
+      evaluated = evaluated.replace(`[${innerContent}]`, parsed);
     } catch (error) {
-      console.warn(`QueFlow Execution Error from expression \`${match}\`\n`, error);
-      return match;
+      console.warn(`QueFlow Execution Error from expression \`${innerContent}\`\n`, error);
     }
-  });
+  }
+  
+  // Clear reactivity tracker
   currentTemplate = "";
   
   return evaluated;
@@ -350,7 +401,7 @@ function wrapBareExpressions(root) {
   while ((node = walker.nextNode())) {
     const text = node.nodeValue;
     
-    if (text.indexOf('{{') !== -1 && text.indexOf('}}') !== -1 && node.parentNode.childElementCount > 0) {
+    if (text.indexOf('[') !== -1 && text.indexOf(']') !== -1 && node.parentNode.childElementCount > 0) {
       nodesToWrap.push(node);
     }
   }
@@ -369,7 +420,6 @@ function wrapBareExpressions(root) {
 
 
 function processComponentMarkup(jsx, instance, subId) {
-  // Assign to the template. Natively inert, no image/script pre-fetching.
   sharedTemplate.innerHTML = jsx;
   const fragment = sharedTemplate.content;
   
@@ -387,7 +437,7 @@ function processComponentMarkup(jsx, instance, subId) {
         element.setAttribute("data-sub_id", subId);
       }
       
-      const childData = generateComponentData(
+      const childData = generateDataQF(
         element,
         element.childElementCount > 0, // isParent
         instance
@@ -433,18 +483,21 @@ function convertDirective(attr, value, child) {
   // --- Standard directives ---
   switch (attr) {
     case 'q:show': {
-      if (value.includes('{{') && value.includes('}}')) {
-        const expr = b(value).trim();
-        return ['display', `{{ ${expr} ? 'block' : 'none' }}`, false];
+      if (value.includes('[') && value.includes(']')) {
+        const expr = b(value, true).trim();
+        return ['display', `[ ${expr} ? 'block' : 'none' ]`, false];
       }
       return ['display', (value === 'true' || value === true) ? 'block' : 'none', false];
     }
     case 'q:text':
       child.textContent = value;
-      return ['textContent', value, false]; // Added 'false' to match expected destructuring
+      return ['textContent', value, false];
       
     case 'q:html':
-      return ['innerHTML', value, false]; // Added 'false'
+      return ['innerHTML', value, false];
+      
+    case 'q:value':
+      return ['value', value, false];
       
     default:
       if (attr === 'q:once') {
@@ -459,14 +512,18 @@ function convertDirective(attr, value, child) {
 
 // Attribute-to-property mapping for standard DOM elements
 const ATTR_TO_PROP = {
-  for: 'htmlFor', tabindex: 'tabIndex',
-  readonly: 'readOnly', maxlength: 'maxLength', accesskey: 'accessKey',
-  colspan: 'colSpan', rowspan: 'rowSpan'
+  for: 'htmlFor',
+  tabindex: 'tabIndex',
+  readonly: 'readOnly',
+  maxlength: 'maxLength',
+  accesskey: 'accessKey',
+  colspan: 'colSpan',
+  rowspan: 'rowSpan'
 };
 
 const CONTENT_DIRECTIVES = new Set(['q:text', 'q:html', 'q:once:text', 'q:once:html']);
 
-const generateComponentData = (child, isParent, instance) => {
+const generateDataQF = (child, isParent, instance) => {
   const arr = [];
   const attributes = getAttributes(child);
   let QFID = child.getAttribute("data-qfid");
@@ -497,7 +554,7 @@ const generateComponentData = (child, isParent, instance) => {
     let once = false;
     [attribute, value, once] = convertDirective(attribute, value, child);
     
-    const hasTemplate = value.indexOf('{{') !== -1 && value.indexOf('}}') !== -1;
+    const hasTemplate = value.indexOf('[') !== -1 && value.indexOf(']') !== -1;
     
     // Short-circuit logic: Check 'src' first to avoid triggering 
     // the heavy `in childStyle` prototype lookup if we don't have to.
@@ -517,7 +574,7 @@ const generateComponentData = (child, isParent, instance) => {
     
     if (!QFID) {
       QFID = `qf${counterQF++}`;
-      child.setAttribute('data-qfid', QFID); 
+      child.setAttribute('data-qfid', QFID);
     }
     
     if (isStyle) {
@@ -542,7 +599,7 @@ const generateComponentData = (child, isParent, instance) => {
     if (isGlobal) {
       GLOBAL_STATE.dataQF.push(entryObj);
     } else {
-      arr.push(entryObj); 
+      arr.push(entryObj);
     }
   }
   
@@ -629,7 +686,7 @@ function handleEventListener(parent, instance) {
           handler = Function("e", `const data = this.data; ${value}`).bind(targetInstance);
           eventHandlerCache.set(cacheKey, handler);
         } catch (e) {
-          console.warn(`QueFlow:\nFailed to add event listener on ${child.tagName} element:\n\nError from: \`${value}\``);
+          console.warn(`QueFlow:\nFailed to add event listener on ${child.tagName} element:\n\nError from: \`${value}\`\n${e}`);
           continue;
         }
       }
@@ -762,15 +819,15 @@ function updateComponent(changedKey, instance) {
 }
 
 // Module‑level constant
-const RENDER_TEMPLATE_REGEX = /\{\{([^\{\}]+)\}\}/g;
+const RENDER_TEMPLATE_REGEX = /\[(.*?)\]/g;
 
 function renderTemplate(input, props, shouldSanitize) {
-  return input.replace(RENDER_TEMPLATE_REGEX, (_, extracted) => {
-    const trimmed = extracted.trim();
+  return input.replace(RENDER_TEMPLATE_REGEX, (extracted) => {
+    const trimmed = b(extracted).trim();
     const value = props[trimmed];
     
     if (value === undefined || value === null) {
-      return `{{ ${trimmed} }}`; // keep placeholder for debugging
+      return `[ ${trimmed} ]`; // keep placeholder for debugging
     }
     
     return shouldSanitize ? sanitizeString(value) : value;
@@ -969,54 +1026,57 @@ function initiateComponents(markup, isNugget, fromAtom) {
 
 
 const lintPlaceholders = (html, isNugget) => {
-  const attributeRegex = /\w+\s*=\s*\{\{[^}]+\}\}/g;
-  const eventRegex = /on\w+\s*=\s*\{\{(.*?)\}\}/gs;
-  
-  if (eventRegex.test(html) && !isNugget) {
-    html = html.replace(eventRegex, (match) => {
-      return match.replaceAll("'", "`").replace("{{", "'").replace(/}}$/, "'");
+  // Support colons (:) and dashes (-) in custom template directives
+  // Handles balanced sibling brackets like [options[4] + options[5]] cleanly
+  const eventRegex = /(on[\w-:]+)\s*=\s*\[((?:[^\[\]]|\[[^\[\]]*\])*)\]/g;
+  const attributeRegex = /([\w-:]+)\s*=\s*\[((?:[^\[\]]|\[[^\[\]]*\])*)\]/g;
+
+  // 1. Process Events (Bypassing .test() double-scan overhead)
+  if (!isNugget) {
+    html = html.replace(eventRegex, (_, attrName, innerContent) => {
+      return `${attrName}='${innerContent.replaceAll("'", "`")}'`;
     });
   }
-  
-  if (attributeRegex.test(html)) {
-    return html.replace(attributeRegex, (match) => {
-      return match.replace("{{", '"{{').replace(/}}$/, '}}"');
-    });
-  }
-  return html;
+
+  // 2. Process Directives & Standard Attributes
+  return html.replace(attributeRegex, (_, attrName, innerContent) => {
+    return `${attrName}="[${innerContent}]"`;
+  });
 };
 
 const removeEvents = (nodeList, shouldRemove) => {
-  for (const child of nodeList) {
-    const attributes = child.attributes;
+  // 1. Standard for-loop avoids iterator allocation overhead on HTMLCollections
+  for (let i = 0, len = nodeList.length; i < len; i++) {
+    const child = nodeList[i];
     
-    if (attributes) {
-      for (let i = 0; i < attributes.length; i++) {
-        const attrName = attributes[i].name;
-        
-        if (attrName.startsWith("on")) {
-          // If it was assigned via property (e.g., child.onclick = fn)
-          child[attrName] = null;
-          
-          // If it was assigned via addEventListener, 
-          const eventType = attrName.slice(2);
-          const fn = child[attrName];
-          if (fn) child.removeEventListener(eventType, fn);
-        }
-      }
-    }
-    
+    // 2. Clean up QueFlow's tracked handlers (Fastest path)
     if (child._qfHandlerKeys) {
-      for (const key of child._qfHandlerKeys) {
-        eventHandlerCache.delete(key);
+      const keys = child._qfHandlerKeys;
+      for (let j = 0, kLen = keys.length; j < kLen; j++) {
+        eventHandlerCache.delete(keys[j]);
       }
       child._qfHandlerKeys = null;
     }
     
-    const qfid = child.dataset ? child.dataset.qfid : child.getAttribute('data-qfid');
+    // 3. Clean up native inline attributes (e.g. onclick="")
+    const attributes = child.attributes;
+    if (attributes) {
+      for (let j = 0; j < attributes.length; j++) {
+        const attrName = attributes[j].name;
+        
+        // 111 is 'o', 110 is 'n'. Char code checks bypass string allocation.
+        if (attrName.charCodeAt(0) === 111 && attrName.charCodeAt(1) === 110) {
+          // This removes the DOM property mapping safely
+          child[attrName] = null;
+        }
+      }
+    }
+    
+    // 4. Bypass dataset completely, rely solely on getAttribute
+    const qfid = child.getAttribute('data-qfid');
     if (qfid) reactiveCache.delete(qfid);
     
-    // Teardown
+    // 5. Teardown
     if (shouldRemove) child.remove();
   }
   
@@ -1330,10 +1390,10 @@ class Component {
 }
 
 function addIndexToTemplate(str, index) {
-  const regex = /\{\{[^\{\{]+\}\}/g;
+  const regex = /\[(.*?)\]/g;
   const output = str.replace(regex, (match) => {
     const inner = b(match).trim();
-    return `{{ this.data[${index}].${inner} }}`;
+    return `[ this.data[${index}].${inner} ]`;
   });
   return lintPlaceholders(output);
 }
@@ -1343,7 +1403,7 @@ const sharedTemplate = document.createElement('template');
 
 function g(str, className) {
   sharedTemplate.innerHTML = str;
- 
+  
   const children = sharedTemplate.content.querySelectorAll("*");
   
   for (let i = 0, len = children.length; i < len; i++) {
@@ -1355,7 +1415,7 @@ function g(str, className) {
 
 function stringToDocumentFragment(htmlString = "") {
   sharedTemplate.innerHTML = htmlString;
-
+  
   return sharedTemplate.content.cloneNode(true);
 }
 
@@ -1562,11 +1622,11 @@ const loadComponent = (path) => {
 
 const Link = new Nugget('Link', {
   template: (data) => {
-    const classN = data.class ? 'class={{ class }}' : '';
+    const classN = data.class ? 'class=[ class ]' : '';
     return `
-      <a href={{ to }} ${ classN } onclick="
+      <a href=[ to ] ${ classN } onclick="
         e.preventDefault()
-        toPage('{{ to }}')">${ data.isBtn ? '<button>{{ label }}</button>' : '{{ label }}' }</a>`
+        toPage('[ to ]')">${ data.isBtn ? '<button>[ label ]</button>' : '[ label ]' }</a>`
   }
 })
 
@@ -1643,6 +1703,5 @@ export {
   Component,
   Nugget,
   Atom,
-  onNavigate,
   globalState
 };

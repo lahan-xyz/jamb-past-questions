@@ -1,11 +1,15 @@
-import { Component } from 'queflow'
+import { Component, globalState } from 'queflow'
 import QuestionCard from '../atoms/QuestionCard.js'
-
 
 // Subject list
 const SUBJECTS = ['Mathematics', 'English', 'Chemistry', 'Physics']
 
 const YEARS = Array.from({ length: 2025 - 1978 + 1 }, (_, i) => 1978 + i)
+
+globalState('$pq', {
+  subject: SUBJECTS[0],
+  year: YEARS[0]
+}, true)
 
 async function loadSubject(subject, year) {
   const module = await import(`../scraper/past-questions/${subject.toLowerCase()}.min.js`);
@@ -13,13 +17,11 @@ async function loadSubject(subject, year) {
 }
 
 const AppView = new Component("AppView", {
-  // Only data that is bound in the template goes here
   data: {
-    currentSubject: 'Mathematics',
-    currentYear: 2024,
+    currentSubject: $pq.subject,
+    currentYear: $pq.year,
     currentPage: 1,
-    totalPages: 6, // will be updated dynamically
-    exist: true
+    totalPages: 6
   },
   
   created(data) {
@@ -31,11 +33,17 @@ const AppView = new Component("AppView", {
       return [first, second]
     }
     
-    this.transformQuestObj = (obj, idxStart) => {
-      return obj.map((obj, index) => {
-        idxStart += 1
-        return { ...obj, quest_no: idxStart, year: data.currentYear }
-      })
+    // Optimized
+    this.transformQuestObj = (questionsArray, idxStart) => {
+      const len = questionsArray.length;
+      const result = new Array(len); // Pre-allocate memory
+      
+      for (let i = 0; i < len; i++) {
+        // Prefix increment bumps the number before assignment
+        result[i] = { ...questionsArray[i], quest_no: ++idxStart, year: data.currentYear };
+      }
+      
+      return result;
     }
     
     this.loadAndRender = async () => {
@@ -68,6 +76,32 @@ const AppView = new Component("AppView", {
         this.loadAndRender()
       }
     }
+    
+    this.changeSubject = (value) => {
+      data.currentSubject = value;
+      data.currentPage = 1; // Reset to page 1
+      this.loadAndRender();
+    }
+    
+    this.changeYear = (value) => {
+      data.currentYear = parseInt(value);
+      data.currentPage = 1; // Reset to page 1
+      this.loadAndRender();
+    }
+  },
+  
+  onUpdate({ key, newVal: value }) {
+    if (key === "currentSubject") {
+      $pq.subject = value;
+      return true;
+    }
+    
+    if (key === "currentYear") {
+      $pq.year = value;
+      return true;
+    }
+    
+    return true;
   },
   
   async run() {
@@ -80,16 +114,16 @@ const AppView = new Component("AppView", {
       <header class="app-header">
         <h1 class="app-title">JAMB Past Questions</h1>
         <div class="app-controls">
-          <select class="app-select" onchange={{ data.currentSubject = e.target.value; this.loadAndRender() }}>
+          <select class="app-select" onchange=[ data.currentSubject = e.target.value; this.loadAndRender() ]>
             ${SUBJECTS.map(sub => `<option value="${sub}">${sub}</option>`).join('')}
           </select>
-          <select class="app-select" onchange={{ data.currentYear = parseInt(e.target.value); this.loadAndRender() }}>
+          <select class="app-select" onchange=[ data.currentYear = parseInt(e.target.value); this.loadAndRender() ]>
             ${YEARS.map(year => `<option value="${year}" ${ year === data.currentYear ? 'selected' : '' }>${year}</option>`).join('')}
           </select>
           <div class="page-nav">
-            <button class="page-btn" onclick={{ this.previousPage() }}>← Prev</button>
-            <span class="page-indicator">{{ currentPage }} / {{ totalPages }}</span>
-            <button class="page-btn" onclick={{ this.nextPage() }}>Next →</button>
+            <button class="page-btn" onclick=[ this.previousPage() ]>← Prev</button>
+            <span class="page-indicator">[ currentPage ] / [ totalPages ]</span>
+            <button class="page-btn" onclick=[ this.nextPage() ]>Next →</button>
           </div>
         </div>
       </header>

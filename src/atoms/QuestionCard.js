@@ -8,37 +8,37 @@ const QuestionCard = new Atom("QuestionCard", {
       <div class="qc-header">
         <div class="qc-badge">
           <span class="qc-badge-label">Q</span>
-          <span class="qc-badge-num">{{ quest_no }}</span>
+          <span class="qc-badge-num">[ quest_no ]</span>
         </div>
-        <span class="qc-year">{{ year }}</span>
+        <span class="qc-year">[ year ]</span>
       </div>
 
-      <div class="qc-image-wrap" q:show="{{ src }}">
-        <img class="qc-image" src="../src/scraper/images/{{ src }}" loading="lazy" alt="{{ year }} Question diagram" />
+      <div class="qc-image-wrap" q:show=[ src ]>
+        <img class="qc-image" src="../src/scraper/images/[ src ]" loading="lazy" alt="[ year ] Question diagram" />
       </div>
 
       <div class="qc-body">
-        <p class="qc-text" q:text="{{ question }}"></p>
+        <p class="qc-text" q:text="[ question ]"></p>
         <div class="qc-options">
           <button class="qc-opt" data-letter="A">
             <span class="qc-opt-letter">A</span>
-            <span class="qc-opt-text">{{ options[0] }}</span>
+            <span class="qc-opt-text">[ options[0] ]</span>
           </button>
           <button class="qc-opt" data-letter="B">
             <span class="qc-opt-letter">B</span>
-            <span class="qc-opt-text">{{ options[1] }}</span>
+            <span class="qc-opt-text">[ options[1] ]</span>
           </button>
           <button class="qc-opt" data-letter="C">
             <span class="qc-opt-letter">C</span>
-            <span class="qc-opt-text">{{ options[2] }}</span>
+            <span class="qc-opt-text">[ options[2] ]</span>
           </button>
           <button class="qc-opt" data-letter="D">
             <span class="qc-opt-letter">D</span>
-            <span class="qc-opt-text">{{ options[3] }}</span>
+            <span class="qc-opt-text">[ options[3] ]</span>
           </button>
-          <button class="qc-opt" data-letter="E" q:show="{{ options[4] }}">
+          <button class="qc-opt" data-letter="E" q:show=[ options[4] ]>
             <span class="qc-opt-letter">E</span>
-            <span class="qc-opt-text">{{ options[4] }}</span>
+            <span class="qc-opt-text">[ options[4] ]</span>
           </button>
         </div>
       </div>
