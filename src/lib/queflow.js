@@ -451,7 +451,6 @@ function processComponentMarkup(jsx, instance, subId) {
     }
     
     buildDependencyMap(instance, data);
-    
     return sharedTemplate.innerHTML.replaceAll("<br>", "\n");
     
   } catch (error) {
@@ -673,9 +672,9 @@ function handleEventListener(parent, instance) {
     
     const attributes = getAttributes(child);
     
-    for (const { attribute, value } of attributes) {
+    for (let { attribute, value } of attributes) {
       if (!attribute.startsWith("on")) continue;
-      
+      value = value.trim();
       // Cache key: expression
       const cacheKey = `${value}`;
       let handler = eventHandlerCache.get(cacheKey);
@@ -683,7 +682,7 @@ function handleEventListener(parent, instance) {
       if (!handler) {
         try {
           // Compile the function body once per unique expression pair
-          handler = Function("e", `const data = this.data; ${value}`).bind(targetInstance);
+          handler = Function("e", `const data = this.data; ${value}`);
           eventHandlerCache.set(cacheKey, handler);
         } catch (e) {
           console.warn(`QueFlow:\nFailed to add event listener on ${child.tagName} element:\n\nError from: \`${value}\`\n${e}`);
@@ -692,7 +691,7 @@ function handleEventListener(parent, instance) {
       }
       
       // Assign the handler
-      child[attribute] = handler;
+      child[attribute] = handler.bind(targetInstance);
       
       // Store the cache key on the element for later cleanup
       if (!child._qfHandlerKeys) child._qfHandlerKeys = [];
@@ -1026,12 +1025,10 @@ function initiateComponents(markup, isNugget, fromAtom) {
 
 
 const lintPlaceholders = (html, isNugget) => {
-  // Support colons (:) and dashes (-) in custom template directives
-  // Handles balanced sibling brackets like [options[4] + options[5]] cleanly
-  const eventRegex = /(on[\w-:]+)\s*=\s*\[((?:[^\[\]]|\[[^\[\]]*\])*)\]/g;
+  const eventRegex = /(on[\w]+)\s*=\s*\[((?:[^\[\]]|\[[^\[\]]*\])*)\]/g;
   const attributeRegex = /([\w-:]+)\s*=\s*\[((?:[^\[\]]|\[[^\[\]]*\])*)\]/g;
 
-  // 1. Process Events (Bypassing .test() double-scan overhead)
+  // 1. Process Events
   if (!isNugget) {
     html = html.replace(eventRegex, (_, attrName, innerContent) => {
       return `${attrName}='${innerContent.replaceAll("'", "`")}'`;
@@ -1053,23 +1050,15 @@ const removeEvents = (nodeList, shouldRemove) => {
     if (child._qfHandlerKeys) {
       const keys = child._qfHandlerKeys;
       for (let j = 0, kLen = keys.length; j < kLen; j++) {
-        eventHandlerCache.delete(keys[j]);
+        const attrName = keys[j];
+        const handler = child[attrName];
+        
+        if (handler) child.removeEventListener(attrName, handler);
+        
+        child[attrName] = null;
+        eventHandlerCache.delete(attrName);
       }
       child._qfHandlerKeys = null;
-    }
-    
-    // 3. Clean up native inline attributes (e.g. onclick="")
-    const attributes = child.attributes;
-    if (attributes) {
-      for (let j = 0; j < attributes.length; j++) {
-        const attrName = attributes[j].name;
-        
-        // 111 is 'o', 110 is 'n'. Char code checks bypass string allocation.
-        if (attrName.charCodeAt(0) === 111 && attrName.charCodeAt(1) === 110) {
-          // This removes the DOM property mapping safely
-          child[attrName] = null;
-        }
-      }
     }
     
     // 4. Bypass dataset completely, rely solely on getAttribute
@@ -1114,46 +1103,62 @@ const renderComponent = (instance, name, flag) => {
   return rendered;
 };
 
+
+
+
 class App {
+  // 1. Declare strict private fields
+  #element;
+  #isFrozen = false;
+  #useStrict;
+  #onUpdate;
+  #run;
+  #created;
+  #template;
+  
   constructor(selector = "", options = {}) {
-    this.element = typeof selector == "string" ?
+    this.#element = typeof selector === "string" ?
       document.querySelector(selector) :
       selector;
     
-    if (!this.element) {
-      throw new Error("QueFlow:\nElement selector '" + selector + "' is invalid");
+    if (!this.#element) {
+      throw new Error(`QueFlow:\nElement selector '${selector}' is invalid`);
     }
+    
+    // Template
+    this.#template = options.template || "";
     
     // Reactive state
     this.data = createSignal(options.data, this);
     
-    this.isFrozen = false;
     this.stylesheet = options.stylesheet;
-    this.onUpdate = options.onUpdate;
-    this.created = options.created;
-    this.run = options.run || (() => {});
-    this.useStrict = Object.keys(options).includes('useStrict') ? options.useStrict : true;
+    
+    // Assign to private fields
+    this.#onUpdate = options.onUpdate;
+    this.#created = options.created;
+    this.#run = options.run || (() => {});
+    
+    // O(1) existence check instead of O(N) array allocation
+    this.#useStrict = 'useStrict' in options ? options.useStrict : true;
     
     // Batched rendering queue
     this._renderPending = false;
-    this._renderScheduled = false;
     
     initiateStyleSheet("", this);
     
     let _data = this.data;
     Object.defineProperties(this, {
-      template: { value: options.template },
       data: {
         get: () => _data,
         set: (data) => {
-          if (!this.isFrozen) {
-            if (typeof data !== "object") {
-              console.warn(`Value of 'App.data' must be an object`);
+          if (!this.#isFrozen) {
+            // Hardened object validation
+            if (!data || typeof data !== "object" || Array.isArray(data)) {
+              console.warn(`Value of 'App.data' must be a plain object`);
               return;
             }
             
             const keys = Object.keys(data);
-            
             for (let key of keys) {
               this.data[key] = data[key];
             }
@@ -1164,14 +1169,21 @@ class App {
       }
     });
     
-    if (this.created) {
-      this.created(this.data);
-      this.created = null;
+    if (this.#created) {
+      this.#created(this.data);
+      this.#created = null; // Can still mutate internally
     }
   }
   
-  // Schedule a render using microtask – if multiple changes happen
-  // synchronously, only one render occurs.
+  // 2. Expose read-only public getters
+  get element() { return this.#element; }
+  get template() { return this.#template; }
+  get isFrozen() { return this.#isFrozen; }
+  get useStrict() { return this.#useStrict; }
+  get onUpdate() { return this.#onUpdate; }
+  get run() { return this.#run; }
+  get created() { return this.#created; }
+  
   _scheduleRender() {
     if (!this._renderPending) {
       this._renderPending = true;
@@ -1182,7 +1194,6 @@ class App {
     }
   }
   
-  // The actual render logic, now private
   _doRender() {
     let template = this.template instanceof Function ?
       this.template(this.data) :
@@ -1191,21 +1202,15 @@ class App {
     template = handleRouter(template);
     template = initiateComponents(template, false, false);
     
-    // Convert template to HTML (still returns a string)
     const htmlString = processComponentMarkup(template, this);
-    
     const fragment = document.createRange().createContextualFragment(htmlString);
     
-    // Clear the element efficiently (no innerHTML = '')
-    while (this.element.firstChild) {
-      this.element.firstChild.remove();
-    }
-    
-    this.element.appendChild(fragment);
+    // 3. Replaces while-loop removal and appendChild in a single native API call
+    this.#element.replaceChildren(fragment);
     
     currentComponent?.navigateFunc(currentComponent.data);
     
-    handleEventListener(this.element, this);
+    handleEventListener(this.#element, this);
     
     for (const component of components) {
       const instance = component[1];
@@ -1215,29 +1220,26 @@ class App {
       instance.run(instance.data);
     }
     
-    this.run(this.data);
+    this.#run(this.data);
   }
   
-  // Force an immediate render (skip batching) – rarely needed
   render() {
-    // Cancel any pending microtask to avoid double render
     this._renderPending = false;
     this._doRender();
   }
   
   freeze() {
-    this.isFrozen = true;
+    this.#isFrozen = true; // Internal mutation works perfectly
   }
   
   unfreeze() {
-    this.isFrozen = false;
+    this.#isFrozen = false;
   }
   
   destroy() {
-    // ✅ Optimized descendant collection
-    const allNodes = [this.element];
+    const allNodes = [this.#element];
     const walker = document.createTreeWalker(
-      this.element,
+      this.#element,
       NodeFilter.SHOW_ELEMENT
     );
     let node;
@@ -1246,97 +1248,122 @@ class App {
     }
     
     removeEvents(allNodes);
-    this.element.remove();
+    this.#element.remove();
   }
 }
 
 
 class Component {
+  // 1. Declare strict private fields
+  #name;
+  #isFrozen = false;
+  #useStrict;
+  #onUpdate;
+  #run;
+  #created;
+  #template;
+  
   constructor(name, options = {}) {
     if (name) {
       globalThis[name] = this;
     }
     
-    this.name = name;
-    this.template = options?.template;
-    this.run = options.run || (() => {});
+    // Assign to private fields
+    this.#name = name;
+    this.#template = options?.template;
+    this.#run = options.run || (() => {});
+    this.isMounted = false;
     this.navigateFunc = options.onNavigate || (() => {});
-    if (!this.template) throw new Error("QueFlow:\nTemplate not provided for Component " + name);
+    
+    if (!this.#template) {
+      throw new Error(`QueFlow:\nTemplate not provided for Component ${name}`);
+    }
     
     this.element = `qfEl${counterQF}`; // string ID – later resolved to DOM node
     counterQF++;
-    this.isMounted = false;
     
     // Reactive state
     this.data = createSignal(options.data, this);
     
-    this.isFrozen = false;
-    this.created = options.created;
+    this.#created = options.created;
     this.stylesheet = options.stylesheet;
-    this.onUpdate = options.onUpdate;
-    this.useStrict = Object.keys(options).includes('useStrict') ? options.useStrict : true;
+    this.#onUpdate = options.onUpdate;
+    
+    // O(1) existence check instead of O(N) array allocation
+    this.#useStrict = 'useStrict' in options ? options.useStrict : true;
     
     // Batched rendering queue (microtask‑based)
     this._renderPending = false;
+    
     let _data = this.data;
-    Object.defineProperties(this, {
-      template: { value: options.template },
-      data: {
-        get: () => _data,
-        set: (data) => {
-          if (!this.isFrozen) {
-            if (typeof data !== "object") {
-              console.warn(`Value of '${this.name}.data' must be an object`);
-              return;
-            }
-            
-            const keys = Object.keys(data);
-            
-            for (let key of keys) {
-              this.data[key] = data[key];
-            }
+    
+    // 2. Only define the custom setter/getter for `data` here
+    Object.defineProperty(this, "data", {
+      get: () => _data,
+      set: (data) => {
+        if (!this.#isFrozen) {
+          // Hardened object validation
+          if (!data || typeof data !== "object" || Array.isArray(data)) {
+            console.warn(`Value of '${this.#name}.data' must be a plain object`);
+            return;
           }
-          return true;
-        },
-        configurable: true
-      }
+          
+          const keys = Object.keys(data);
+          
+          for (let key of keys) {
+            this.data[key] = data[key];
+          }
+        }
+        return true;
+      },
+      configurable: true
     });
     
-    if (this.created) this.created(this.data);
-    this.created = null;
+    if (this.#created) {
+      this.#created(this.data);
+      this.#created = null; // Safe internal mutation
+    }
+    
     components.set(name, this);
   }
   
-  // Schedule render via microtask – coalesce multiple data changes
+  // 3. Expose read-only public getters
+  get name() { return this.#name; }
+  get isFrozen() { return this.#isFrozen; }
+  get useStrict() { return this.#useStrict; }
+  get onUpdate() { return this.#onUpdate; }
+  get run() { return this.#run; }
+  get created() { return this.#created; }
+  get template() { return this.#template; }
+  
   _scheduleRender() {
     if (!this._renderPending) {
       this._renderPending = true;
       queueMicrotask(() => {
         this._renderPending = false;
-        // Guard: don't render if the component has been destroyed or unmounted
-        if (this.element && this.element.isConnected) {
-          renderComponent(this, this.name);
+        
+        const el = this._resolveElement();
+        if (el && el.isConnected) {
+          renderComponent(this, this.#name);
         }
       });
     }
   }
   
-  // Force an immediate render (skip batching) – rarely needed
   renderNow() {
-    this._renderPending = false; // cancel any queued microtask
-    renderComponent(this, this.name);
+    this._renderPending = false;
+    renderComponent(this, this.#name);
   }
   
   freeze() {
-    this.isFrozen = true;
+    this.#isFrozen = true;
   }
   
   unfreeze() {
-    this.isFrozen = false;
+    this.#isFrozen = false;
   }
   
   show() {
-    // Guard already present – keep it. If element is a string, skip.
     const el = this._resolveElement();
     if (el && el.style.display !== 'block') {
       el.style.display = 'block';
@@ -1352,22 +1379,21 @@ class Component {
   
   mount() {
     if (!this.isMounted) {
-      const rendered = renderComponent(this, this.name, true);
-      
+      const rendered = renderComponent(this, this.#name, true);
       const fragment = document.createRange().createContextualFragment(rendered);
       const el = this._resolveElement();
+      
       if (el) {
-        // Clear any existing content quickly
-        while (el.firstChild) el.firstChild.remove();
-        el.appendChild(fragment);
+        // 4. Native C++ engine replacement replaces loop allocation
+        el.replaceChildren(fragment);
       }
+      
       handleEventListener(el || this.element, this);
-      this.isMounted = true;
+      this.isMounted = true; // Internal mutation
     }
   }
   
   destroy() {
-    // Descendant collection with TreeWalker
     const el = this._resolveElement();
     if (!el) return;
     
@@ -1377,6 +1403,7 @@ class Component {
     while ((node = walker.nextNode())) {
       allNodes.push(node);
     }
+    
     removeEvents(allNodes);
     el.remove();
   }
@@ -1393,7 +1420,7 @@ function addIndexToTemplate(str, index) {
   const regex = /\[(.*?)\]/g;
   const output = str.replace(regex, (match) => {
     const inner = b(match).trim();
-    return `[ this.data[${index}].${inner} ]`;
+    return `[this.data[${index}].${inner}]`;
   });
   return lintPlaceholders(output);
 }
@@ -1419,60 +1446,94 @@ function stringToDocumentFragment(htmlString = "") {
   return sharedTemplate.content.cloneNode(true);
 }
 
+
+
 class Atom {
+  // 1. Declare strict private fields
+  #element;
+  #name;
+  #template;
+  #data = [];
+  #useStrict = true;
+  #isReactive;
+  
   constructor(name, options, id) {
-    globalThis[name] = this;
-    this.element = id;
-    this.name = name;
-    this.template = options.template;
+    this.#element = id;
+    this.#name = name;
+    this.#template = options.template;
+    this.#isReactive = options.isReactive;
+    
     this.stylesheet = options.stylesheet;
     initiateStyleSheet(`#${id}`, this);
-    this.data = [];
-    this.index = 0;
-    this.useStrict = true;
-    this.isReactive = options.isReactive;
   }
   
-  // Resolve string ID to DOM element once and cache it
+  // 2. Expose read-only public getters
+  get element() { return this.#element; }
+  get name() { return this.#name; }
+  get template() { return this.#template; }
+  get data() { return this.#data; }
+  get useStrict() { return this.#useStrict; }
+  get isReactive() { return this.#isReactive; }
+  
+  // Resolve string ID to DOM element once and cache it internally
   _getElement() {
-    if (typeof this.element === "string") {
-      this.element = document.getElementById(this.element);
-      if (!this.element) throw new Error(`Mount node of '${this.name}' is invalid or not provided`);
+    if (typeof this.#element === "string") {
+      const resolvedNode = document.getElementById(this.#element);
+      if (!resolvedNode) {
+        throw new Error(`QueFlow:\nMount node of '${this.#name}' is invalid or not provided`);
+      }
+      this.#element = resolvedNode; // Cache the node
     }
-    return this.element;
+    return this.#element;
   }
   
-  // Optionally clear the container (if needed externally)
+  // Cleanly clear the container and purge events
   destroy() {
     const el = this._getElement();
-    removeEvents([el.firstChild, ...el.firstChild.querySelectorAll('*')]);
-    el.firstChild.remove();
+    if (!el) return;
     
-    this.data = [];
+    // Use highly performant TreeWalker instead of CSS querySelectorAll('*')
+    const allNodes = [];
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_ELEMENT);
+    let node = walker.currentNode; // Start at root container
+    
+    while (node) {
+      allNodes.push(node);
+      node = walker.nextNode();
+    }
+    
+    removeEvents(allNodes);
+    
+    // Safely removes ALL children at native C++ speeds
+    el.replaceChildren();
+    
+    this.#data = [];
   }
   
   renderWith(data, position = "append") {
-    if (typeof data !== "object")
-      throw new Error(`First argument passed to '${this.name}.renderWith()' must either be an object or an array.`);
+    if (!data || typeof data !== "object") {
+      throw new Error(`QueFlow:\nFirst argument passed to '${this.#name}.renderWith()' must either be an object or an array.`);
+    }
     
     const el = this._getElement();
     const dataArray = Array.isArray(data) ? data : [data];
     if (dataArray.length === 0) return;
     
-    this.data = createSignal(dataArray.slice(), this); // shallow copy
+    // Assign directly to the private field
+    this.#data = createSignal(dataArray.slice(), this);
     
     // Build one combined HTML string from all items
     let combinedHTML = '';
     
     for (let i = 0; i < dataArray.length; i++) {
       const item = dataArray[i];
-      const rawTemplate = typeof this.template === "function" ?
-        this.template(item, i) :
-        this.template;
+      const rawTemplate = typeof this.#template === "function" ?
+        this.#template(item, i) :
+        this.#template;
       
       const indexedTemplate = addIndexToTemplate(rawTemplate, i);
       
-      if (this.isReactive) {
+      if (this.#isReactive) {
         // Expand components/nuggets before concatenation
         combinedHTML += initiateComponents(indexedTemplate, false, true);
       } else {
@@ -1500,21 +1561,23 @@ class Atom {
   }
   
   set(index, value) {
-    if (!this.isReactive) throw new Error(`Cannot call 'set()' on Atom ${this.name}.\n\n${this.name} is not a reactive Atom`);
+    if (!this.#isReactive) {
+      throw new Error(`QueFlow:\nCannot call 'set()' on Atom ${this.#name}.\n\n${this.#name} is not a reactive Atom`);
+    }
     
     if (typeof index === "number") {
-      if (typeof value === "object") {
+      if (value && typeof value === "object") {
         Object.keys(value).forEach(key => {
-          this.data[index][key] = value[key];
+          this.#data[index][key] = value[key];
         });
       }
     } else if (Array.isArray(index)) {
-      index.forEach((obj, i) => {
-        if (index[i]) this.data[i] = index[i];
+      // Streamlined: directly uses the mapped item instead of re-querying the array index
+      index.forEach((newObj, i) => {
+        if (newObj) this.#data[i] = newObj;
       });
     } else {
-      console.warn(`First Argument passed to '${this.name}.set()' must either be a number or an array.`);
-      return;
+      console.warn(`QueFlow:\nFirst Argument passed to '${this.#name}.set()' must either be a number or an array.`);
     }
   }
 }
@@ -1554,25 +1617,34 @@ class Nugget {
    * @param {Object} options    An object containing all required options for the component
    */
   
+  // 1. Declare strict private fields
+  #className;
+  #template;
+  
   constructor(name, options = {}) {
-    if (name) {
-      globalThis[name] = this;
-    }
-    // Stores instanc's stylesheet 
+    // Stores instance's stylesheet 
     this.stylesheet = options.stylesheet ?? {};
     
     // Create a property that generates a unique className for instance's parent element
-    this.className = `nugget${nuggetCounter}`;
-    // Increment the counterQF variable for later use
+    this.#className = `nugget${nuggetCounter}`;
+    
+    // Increment the nuggetCounter variable for later use
     nuggetCounter++;
+    
     // Stores template 
-    this.template = options.template;
+    this.#template = options.template;
     this.stylesheetInitiated = false;
-    nuggets.set(name, this)
+    
+    nuggets.set(name, this);
   }
   
+  // 2. Expose read-only public getters
+  get className() { return this.#className; }
+  get template() { return this.#template; }
+  
   destroy() {
-    const all = document.querySelectorAll(`.${this.className}`);
+    // 3. Query safely utilizing the internal private field
+    const all = document.querySelectorAll(`.${this.#className}`);
     // Remove elements and their events from the DOM
     removeEvents(all, true);
   }

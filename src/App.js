@@ -2,7 +2,9 @@ import { App } from 'queflow'
 import AppView from './components/AppView.js'
 
 const JambApp = new App('#app', {
-  template: () => `<AppView/>`,
+  template: () => `
+    <AppView/>
+    `,
   stylesheet: {
     "html, body": `
       margin: 0;
@@ -17,6 +19,6 @@ const JambApp = new App('#app', {
       -webkit-tap-highlight-color: transparent;
     `,
   },
-})
+});
 
 JambApp.render()
