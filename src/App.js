@@ -10,9 +10,9 @@ const JambApp = new App('#app', {
       margin: 0;
       padding: 0;
       box-sizing: border-box;
+      background: #0a0a0f;
     `,
     "body": `
-      background: #0a0a0f;
       font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
       color: #e4e4e7;
       min-height: 100vh;
@@ -21,4 +21,4 @@ const JambApp = new App('#app', {
   },
 });
 
-JambApp.render()
+JambApp.render();
