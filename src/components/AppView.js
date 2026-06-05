@@ -114,10 +114,10 @@ const AppView = new Component("AppView", {
       <header class="app-header">
         <h1 class="app-title">JAMB Past Questions</h1>
         <div class="app-controls">
-          <select class="app-select" onchange=[ data.currentSubject = e.target.value; this.loadAndRender() ]>
+          <select aria-label="Select Subject" class="app-select" onchange=[ data.currentSubject = e.target.value; this.loadAndRender() ]>
             ${SUBJECTS.map(sub => `<option value="${sub}" ${ sub === data.currentSubject ? 'selected' : '' }>${sub}</option>`).join('')}
           </select>
-          <select class="app-select" onchange=[ data.currentYear = parseInt(e.target.value); this.loadAndRender() ]>
+          <select aria-label="Select Year" class="app-select" onchange=[ data.currentYear = parseInt(e.target.value); this.loadAndRender() ]>
             ${YEARS.map(year => `<option value="${year}" ${ year === data.currentYear ? 'selected' : '' }>${year}</option>`).join('')}
           </select>
           <div class="page-nav">
