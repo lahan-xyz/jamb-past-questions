@@ -6,11 +6,10 @@ const JambApp = new App('#app', {
     <AppView/>
     `,
   stylesheet: {
-    "html, body": `
+    "html": `
       margin: 0;
       padding: 0;
       box-sizing: border-box;
-      background: #0a0a0f;
     `,
     "body": `
       font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
