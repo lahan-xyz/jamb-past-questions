@@ -26,7 +26,7 @@ const AppView = new Component("AppView", {
   
   created(data) {
     this.isRendered = false;
-    // Helper functions stay as plain instance props (no reactivity)
+    
     this.computePageIdxRange = () => {
       const first = (data.currentPage * 10) - 10
       const second = (data.currentPage * 10)
@@ -66,45 +66,46 @@ const AppView = new Component("AppView", {
     this.previousPage = () => {
       if (data.currentPage > 1) {
         data.currentPage -= 1
-        this.loadAndRender()
       }
     }
     
     this.nextPage = () => {
       if (data.currentPage < data.totalPages) {
         data.currentPage += 1
-        this.loadAndRender()
       }
     }
     
     this.changeSubject = (value) => {
       data.currentSubject = value;
       data.currentPage = 1; // Reset to page 1
-      this.loadAndRender();
     }
     
     this.changeYear = (value) => {
       data.currentYear = parseInt(value);
       data.currentPage = 1; // Reset to page 1
-      this.loadAndRender();
     }
   },
   
   onUpdate({ key, newVal: value }) {
-    if (key === "currentSubject") {
-      $pq.subject = value;
-      return true;
+    switch (key) {
+      case 'currentSubject':
+        $pq.subject = value;
+        break;
+      
+      case 'currentYear':
+        $pq.year = value;
+        break;
+      
+      default:
+        this.loadAndRender();
+        return true;
     }
     
-    if (key === "currentYear") {
-      $pq.year = value;
-      return true;
-    }
-    
+    this.loadAndRender();
     return true;
   },
   
-  async run() {
+  async run(data) {
     // Initial load
     await this.loadAndRender()
   },
@@ -114,11 +115,19 @@ const AppView = new Component("AppView", {
       <header class="app-header">
         <h1 class="app-title">JAMB Past Questions</h1>
         <div class="app-controls">
-          <select aria-label="Select Subject" class="app-select" onchange=[ data.currentSubject = e.target.value; this.loadAndRender() ]>
+          <select aria-label="Select Subject" class="app-select" q:value=[ currentSubject ] onchange=[ 
+            const { value } = e.target;
+            this.changeSubject(value);
+           ]>
             ${SUBJECTS.map(sub => `<option value="${sub}" ${ sub === data.currentSubject ? 'selected' : '' }>${sub}</option>`).join('')}
           </select>
-          <select aria-label="Select Year" class="app-select" onchange=[ data.currentYear = parseInt(e.target.value); this.loadAndRender() ]>
-            ${YEARS.map(year => `<option value="${year}" ${ year === data.currentYear ? 'selected' : '' }>${year}</option>`).join('')}
+          <select aria-label="Select Year" class="app-select"
+            q:value=[ currentYear ]
+            onchange=[
+            const { value } = e.target;
+            this.changeYear(value);
+          ]>
+            ${YEARS.map(year => `<option value="${year}"  ${ year === data.currentYear ? 'selected' : '' }>${year}</option>`).join('')}
           </select>
           <div class="page-nav">
             <button class="page-btn" onclick=[ this.previousPage() ]>← Prev</button>

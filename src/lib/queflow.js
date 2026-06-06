@@ -1002,7 +1002,7 @@ function initiateComponents(markup, isNugget, fromAtom) {
     markup = markup.replace(COMPONENT_SELF_CLOSING_REGEX, (match, tagName) => {
       const instance = components.get(tagName);
       if (!instance) {
-        console.warn(`QueFlow:\nComponent '${tagName}' is not defined, check whether '${tagName}' is correctly spelt or is defined.`);
+        console.warn(`QueFlow:\nComponent '<${tagName}/>' is not defined, check whether '${tagName}' is correctly spelt or is defined.`);
         return match; // leave original to avoid further breakage
       }
       if (!fromAtom) {
