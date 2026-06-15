@@ -1,5 +1,5 @@
 import { Atom } from 'valen'
-import Text from '../nuggets/Text.js'
+import Text from '../widgets/Text.js'
 
 const QuestionCard = new Atom("QuestionCard", {
   template: () => {
@@ -14,7 +14,7 @@ const QuestionCard = new Atom("QuestionCard", {
       </div>
 
       <div class="qc-image-wrap" q:show=[ src ]>
-        <img class="qc-image" src="../src/scraper/images/[ src ]" loading="lazy" alt="[ year ] Question diagram" />
+        <img class="qc-image" src="https://jamb-past-questions.vercel.app/src/scraper/images/[ src ]" loading="lazy" alt="[ year ] Question diagram" />
       </div>
 
       <div class="qc-body">
