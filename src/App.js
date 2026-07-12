@@ -23,7 +23,7 @@ const JambApp = new App('#app', {
       font-style: normal;
       font-weight: normal;
       font-display: swap;
-      src: url('/src/assets/Inter-Bold.otf');
+      src: url('./src/assets/Inter-Bold.otf');
    `
   },
 });
